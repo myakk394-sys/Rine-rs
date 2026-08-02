@@ -1,0 +1,20 @@
+[package]
+name = "rine"
+version = "0.1.0"
+edition = "2021"
+authors = ["Rine Project Contributors"]
+description = "Lightweight, modern Win64 API translation layer for Linux written in Rust"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+bitflags = "2.4"
+thiserror = "1.0"
+libc = "0.2"
+eframe = "0.27"
+rfd = "0.14"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,3330 @@
+//! Vulkan Command ABI Wrappers (Win64 ABI ↔ System V ABI Thunks)
+//! Provides exact typed wrappers for Vulkan functions so that MSVC PE64 DXVK code
+//! calling via Win64 ABI translates seamlessly into native System V AMD64 Linux Vulkan Loader calls.
+//!
+//! POLICY: All `pAllocator` parameters from guest PE64 are replaced with NULL
+//! to prevent cross-ABI callback corruption (Win64 function pointers in VkAllocationCallbacks
+//! would be invoked by native Linux driver using System V calling convention).
+
+#![allow(non_snake_case)]
+
+use super::loader::get_native_proc_addr;
+use super::types::*;
+use std::ffi::{c_char, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Helper macros
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Resolve native proc address by name and invoke via System V ABI.
+/// Returns VK_ERROR_INITIALIZATION_FAILED if symbol is missing.
+macro_rules! invoke_native {
+    ($fn_name:expr, $fn_type:ty, $($arg:expr),*) => {{
+        if let Some(sym) = get_native_proc_addr($fn_name) {
+            let native_fn: $fn_type = std::mem::transmute(sym);
+            native_fn($($arg),*)
+        } else {
+            VK_ERROR_INITIALIZATION_FAILED
+        }
+    }};
+}
+
+/// Resolve native proc address and invoke a void-returning function.
+macro_rules! invoke_native_void {
+    ($fn_name:expr, $fn_type:ty, $($arg:expr),*) => {{
+        if let Some(sym) = get_native_proc_addr($fn_name) {
+            let native_fn: $fn_type = std::mem::transmute(sym);
+            native_fn($($arg),*);
+        }
+    }};
+}
+
+/// Log a Vulkan call on first occurrence only.
+macro_rules! log_first {
+    ($flag:expr, $($arg:tt)*) => {
+        if !$flag.swap(true, Ordering::Relaxed) {
+            println!($($arg)*);
+        }
+    };
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 1: Global Commands
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkEnumerateInstanceVersion(p_api_version: *mut u32) -> i32 {
+    type NativeFn = unsafe extern "C" fn(*mut u32) -> i32;
+    invoke_native!("vkEnumerateInstanceVersion", NativeFn, p_api_version)
+}
+
+pub unsafe extern "win64" fn guest_vkEnumerateInstanceLayerProperties(
+    p_property_count: *mut u32,
+    p_properties: *mut c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(*mut u32, *mut c_void) -> i32;
+    invoke_native!(
+        "vkEnumerateInstanceLayerProperties",
+        NativeFn,
+        p_property_count,
+        p_properties
+    )
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 2: Instance Lifecycle
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkDestroyInstance(
+    instance: NativeVkInstance,
+    _p_allocator: *const c_void,
+) {
+    // NULL allocator: guest pAllocator is Win64 ABI, cannot be passed to native driver
+    invoke_native_void!(
+        "vkDestroyInstance",
+        unsafe extern "C" fn(NativeVkInstance, *const c_void),
+        instance,
+        std::ptr::null()
+    );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 3: Physical Device Enumeration & Properties
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+static LOG_ENUM_PHYS_DEVS: AtomicBool = AtomicBool::new(false);
+
+pub unsafe extern "win64" fn guest_vkEnumeratePhysicalDevices(
+    instance: NativeVkInstance,
+    p_physical_device_count: *mut u32,
+    p_physical_devices: *mut NativeVkPhysicalDevice,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkInstance, *mut u32, *mut NativeVkPhysicalDevice) -> i32;
+    let res = invoke_native!(
+        "vkEnumeratePhysicalDevices",
+        NativeFn,
+        instance,
+        p_physical_device_count,
+        p_physical_devices
+    );
+    log_first!(
+        LOG_ENUM_PHYS_DEVS,
+        "[VULKAN BRIDGE] vkEnumeratePhysicalDevices -> Result={}, Count={}",
+        res,
+        if !p_physical_device_count.is_null() {
+            *p_physical_device_count
+        } else {
+            0
+        }
+    );
+    res
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceProperties(
+    physical_device: NativeVkPhysicalDevice,
+    p_properties: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetPhysicalDeviceProperties",
+        unsafe extern "C" fn(NativeVkPhysicalDevice, *mut c_void),
+        physical_device,
+        p_properties
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceProperties2(
+    physical_device: NativeVkPhysicalDevice,
+    p_properties: *mut c_void,
+) {
+    // Try vkGetPhysicalDeviceProperties2 first, then KHR variant
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceProperties2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, p_properties);
+    } else if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceProperties2KHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, p_properties);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceFeatures(
+    physical_device: NativeVkPhysicalDevice,
+    p_features: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetPhysicalDeviceFeatures",
+        unsafe extern "C" fn(NativeVkPhysicalDevice, *mut c_void),
+        physical_device,
+        p_features
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceFeatures2(
+    physical_device: NativeVkPhysicalDevice,
+    p_features: *mut c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceFeatures2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, p_features);
+    } else if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceFeatures2KHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, p_features);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceMemoryProperties(
+    physical_device: NativeVkPhysicalDevice,
+    p_memory_properties: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetPhysicalDeviceMemoryProperties",
+        unsafe extern "C" fn(NativeVkPhysicalDevice, *mut c_void),
+        physical_device,
+        p_memory_properties
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceMemoryProperties2(
+    physical_device: NativeVkPhysicalDevice,
+    p_memory_properties: *mut c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceMemoryProperties2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, p_memory_properties);
+    } else if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceMemoryProperties2KHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, p_memory_properties);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceQueueFamilyProperties(
+    physical_device: NativeVkPhysicalDevice,
+    p_count: *mut u32,
+    p_queue_family_properties: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetPhysicalDeviceQueueFamilyProperties",
+        unsafe extern "C" fn(NativeVkPhysicalDevice, *mut u32, *mut c_void),
+        physical_device,
+        p_count,
+        p_queue_family_properties
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceQueueFamilyProperties2(
+    physical_device: NativeVkPhysicalDevice,
+    p_count: *mut u32,
+    p_queue_family_properties: *mut c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceQueueFamilyProperties2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, *mut u32, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, p_count, p_queue_family_properties);
+    } else if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceQueueFamilyProperties2KHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, *mut u32, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, p_count, p_queue_family_properties);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceFormatProperties(
+    physical_device: NativeVkPhysicalDevice,
+    format: u32, // VkFormat is i32 in some defs, u32 in others; Vulkan spec uses int32_t enum
+    p_format_properties: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetPhysicalDeviceFormatProperties",
+        unsafe extern "C" fn(NativeVkPhysicalDevice, u32, *mut c_void),
+        physical_device,
+        format,
+        p_format_properties
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceFormatProperties2(
+    physical_device: NativeVkPhysicalDevice,
+    format: u32,
+    p_format_properties: *mut c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceFormatProperties2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, u32, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, format, p_format_properties);
+    } else if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceFormatProperties2KHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, u32, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, format, p_format_properties);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceImageFormatProperties(
+    physical_device: NativeVkPhysicalDevice,
+    format: u32,
+    img_type: u32,
+    tiling: u32,
+    usage: u32,
+    flags: u32,
+    p_image_format_properties: *mut c_void,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkPhysicalDevice, u32, u32, u32, u32, u32, *mut c_void) -> i32;
+    invoke_native!(
+        "vkGetPhysicalDeviceImageFormatProperties",
+        NativeFn,
+        physical_device,
+        format,
+        img_type,
+        tiling,
+        usage,
+        flags,
+        p_image_format_properties
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceImageFormatProperties2(
+    physical_device: NativeVkPhysicalDevice,
+    p_image_format_info: *const c_void,
+    p_image_format_properties: *mut c_void,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceImageFormatProperties2") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkPhysicalDevice, *const c_void, *mut c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(
+            physical_device,
+            p_image_format_info,
+            p_image_format_properties,
+        )
+    } else if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceImageFormatProperties2KHR") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkPhysicalDevice, *const c_void, *mut c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(
+            physical_device,
+            p_image_format_info,
+            p_image_format_properties,
+        )
+    } else {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSparseImageFormatProperties(
+    physical_device: NativeVkPhysicalDevice,
+    format: u32,
+    img_type: u32,
+    samples: u32,
+    usage: u32,
+    tiling: u32,
+    p_property_count: *mut u32,
+    p_properties: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetPhysicalDeviceSparseImageFormatProperties",
+        unsafe extern "C" fn(
+            NativeVkPhysicalDevice,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            *mut u32,
+            *mut c_void,
+        ),
+        physical_device,
+        format,
+        img_type,
+        samples,
+        usage,
+        tiling,
+        p_property_count,
+        p_properties
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkEnumerateDeviceExtensionProperties(
+    physical_device: NativeVkPhysicalDevice,
+    p_layer_name: *const c_char,
+    p_property_count: *mut u32,
+    p_properties: *mut VkExtensionProperties,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(
+        NativeVkPhysicalDevice,
+        *const c_char,
+        *mut u32,
+        *mut VkExtensionProperties,
+    ) -> i32;
+    invoke_native!(
+        "vkEnumerateDeviceExtensionProperties",
+        NativeFn,
+        physical_device,
+        p_layer_name,
+        p_property_count,
+        p_properties
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkEnumerateDeviceLayerProperties(
+    physical_device: NativeVkPhysicalDevice,
+    p_property_count: *mut u32,
+    p_properties: *mut c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkPhysicalDevice, *mut u32, *mut c_void) -> i32;
+    invoke_native!(
+        "vkEnumerateDeviceLayerProperties",
+        NativeFn,
+        physical_device,
+        p_property_count,
+        p_properties
+    )
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 4: Device Lifecycle
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCreateDevice(
+    physical_device: NativeVkPhysicalDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_device: *mut NativeVkDevice,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(
+        NativeVkPhysicalDevice,
+        *const c_void,
+        *const c_void,
+        *mut NativeVkDevice,
+    ) -> i32;
+    // NULL allocator: guest pAllocator contains Win64 function pointers
+    let res = invoke_native!(
+        "vkCreateDevice",
+        NativeFn,
+        physical_device,
+        p_create_info,
+        std::ptr::null(),
+        p_device
+    );
+    println!(
+        "[VULKAN BRIDGE] vkCreateDevice -> Result={} (Device={:p})",
+        res,
+        if !p_device.is_null() {
+            *p_device
+        } else {
+            std::ptr::null_mut()
+        }
+    );
+    res
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyDevice(
+    device: NativeVkDevice,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyDevice",
+        unsafe extern "C" fn(NativeVkDevice, *const c_void),
+        device,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetDeviceQueue(
+    device: NativeVkDevice,
+    queue_family_index: u32,
+    queue_index: u32,
+    p_queue: *mut *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetDeviceQueue",
+        unsafe extern "C" fn(NativeVkDevice, u32, u32, *mut *mut c_void),
+        device,
+        queue_family_index,
+        queue_index,
+        p_queue
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetDeviceQueue2(
+    device: NativeVkDevice,
+    p_queue_info: *const c_void,
+    p_queue: *mut *mut c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkGetDeviceQueue2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_queue_info, p_queue);
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 5: Surface & WSI (handled via surface.rs for creation)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceSupportKHR(
+    physical_device: NativeVkPhysicalDevice,
+    queue_family_index: u32,
+    surface: NativeVkSurfaceKHR,
+    p_supported: *mut u32,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkPhysicalDevice, u32, NativeVkSurfaceKHR, *mut u32) -> i32;
+    invoke_native!(
+        "vkGetPhysicalDeviceSurfaceSupportKHR",
+        NativeFn,
+        physical_device,
+        queue_family_index,
+        surface,
+        p_supported
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+    physical_device: NativeVkPhysicalDevice,
+    surface: NativeVkSurfaceKHR,
+    p_surface_capabilities: *mut c_void,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkPhysicalDevice, NativeVkSurfaceKHR, *mut c_void) -> i32;
+    invoke_native!(
+        "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+        NativeFn,
+        physical_device,
+        surface,
+        p_surface_capabilities
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceCapabilities2KHR(
+    physical_device: NativeVkPhysicalDevice,
+    p_surface_info: *const c_void,
+    p_surface_capabilities: *mut c_void,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceSurfaceCapabilities2KHR") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkPhysicalDevice, *const c_void, *mut c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(physical_device, p_surface_info, p_surface_capabilities)
+    } else {
+        VK_ERROR_EXTENSION_NOT_PRESENT
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceFormatsKHR(
+    physical_device: NativeVkPhysicalDevice,
+    surface: NativeVkSurfaceKHR,
+    p_surface_format_count: *mut u32,
+    p_surface_formats: *mut c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(
+        NativeVkPhysicalDevice,
+        NativeVkSurfaceKHR,
+        *mut u32,
+        *mut c_void,
+    ) -> i32;
+    invoke_native!(
+        "vkGetPhysicalDeviceSurfaceFormatsKHR",
+        NativeFn,
+        physical_device,
+        surface,
+        p_surface_format_count,
+        p_surface_formats
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceFormats2KHR(
+    physical_device: NativeVkPhysicalDevice,
+    p_surface_info: *const c_void,
+    p_surface_format_count: *mut u32,
+    p_surface_formats: *mut c_void,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceSurfaceFormats2KHR") {
+        type NativeFn = unsafe extern "C" fn(
+            NativeVkPhysicalDevice,
+            *const c_void,
+            *mut u32,
+            *mut c_void,
+        ) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(
+            physical_device,
+            p_surface_info,
+            p_surface_format_count,
+            p_surface_formats,
+        )
+    } else {
+        VK_ERROR_EXTENSION_NOT_PRESENT
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfacePresentModesKHR(
+    physical_device: NativeVkPhysicalDevice,
+    surface: NativeVkSurfaceKHR,
+    p_present_mode_count: *mut u32,
+    p_present_modes: *mut c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(
+        NativeVkPhysicalDevice,
+        NativeVkSurfaceKHR,
+        *mut u32,
+        *mut c_void,
+    ) -> i32;
+    invoke_native!(
+        "vkGetPhysicalDeviceSurfacePresentModesKHR",
+        NativeFn,
+        physical_device,
+        surface,
+        p_present_mode_count,
+        p_present_modes
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroySurfaceKHR(
+    instance: NativeVkInstance,
+    surface: NativeVkSurfaceKHR,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroySurfaceKHR",
+        unsafe extern "C" fn(NativeVkInstance, NativeVkSurfaceKHR, *const c_void),
+        instance,
+        surface,
+        std::ptr::null()
+    );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 6: Swapchain
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCreateSwapchainKHR(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_swapchain: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    let res = invoke_native!(
+        "vkCreateSwapchainKHR",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_swapchain
+    );
+    println!(
+        "[VULKAN BRIDGE] vkCreateSwapchainKHR -> Result={} (Swapchain=0x{:X})",
+        res,
+        if !p_swapchain.is_null() {
+            *p_swapchain
+        } else {
+            0
+        }
+    );
+    res
+}
+
+pub unsafe extern "win64" fn guest_vkDestroySwapchainKHR(
+    device: NativeVkDevice,
+    swapchain: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroySwapchainKHR",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        swapchain,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetSwapchainImagesKHR(
+    device: NativeVkDevice,
+    swapchain: u64,
+    p_swapchain_image_count: *mut u32,
+    p_swapchain_images: *mut u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, *mut u32, *mut u64) -> i32;
+    invoke_native!(
+        "vkGetSwapchainImagesKHR",
+        NativeFn,
+        device,
+        swapchain,
+        p_swapchain_image_count,
+        p_swapchain_images
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkAcquireNextImageKHR(
+    device: NativeVkDevice,
+    swapchain: u64,
+    timeout: u64,
+    semaphore: u64,
+    fence: u64,
+    p_image_index: *mut u32,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u64, u64, u64, *mut u32) -> i32;
+    invoke_native!(
+        "vkAcquireNextImageKHR",
+        NativeFn,
+        device,
+        swapchain,
+        timeout,
+        semaphore,
+        fence,
+        p_image_index
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkAcquireNextImage2KHR(
+    device: NativeVkDevice,
+    p_acquire_info: *const c_void,
+    p_image_index: *mut u32,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut u32) -> i32;
+    invoke_native!(
+        "vkAcquireNextImage2KHR",
+        NativeFn,
+        device,
+        p_acquire_info,
+        p_image_index
+    )
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 7: Queue Operations (Submit / Present / Wait)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkQueueSubmit(
+    queue: *mut c_void,
+    submit_count: u32,
+    p_submits: *const c_void,
+    fence: u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u64) -> i32;
+    invoke_native!(
+        "vkQueueSubmit",
+        NativeFn,
+        queue,
+        submit_count,
+        p_submits,
+        fence
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkQueueSubmit2(
+    queue: *mut c_void,
+    submit_count: u32,
+    p_submits: *const c_void,
+    fence: u64,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkQueueSubmit2") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(queue, submit_count, p_submits, fence)
+    } else if let Some(sym) = get_native_proc_addr("vkQueueSubmit2KHR") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(queue, submit_count, p_submits, fence)
+    } else {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+}
+
+static LOG_PRESENT: AtomicBool = AtomicBool::new(false);
+
+pub unsafe extern "win64" fn guest_vkQueuePresentKHR(
+    queue: *mut c_void,
+    p_present_info: *const c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void) -> i32;
+    let res = invoke_native!("vkQueuePresentKHR", NativeFn, queue, p_present_info);
+
+    // Track presentation confirmation state for software presenter bypass
+    if res == VK_SUCCESS || res == 1
+    /* VK_SUBOPTIMAL_KHR */
+    {
+        crate::graphics::dxgi_vulkan::set_vulkan_presentation_confirmed();
+    }
+
+    log_first!(
+        LOG_PRESENT,
+        "[VULKAN BRIDGE] vkQueuePresentKHR -> Result={}",
+        res
+    );
+    res
+}
+
+pub unsafe extern "win64" fn guest_vkDeviceWaitIdle(device: NativeVkDevice) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice) -> i32;
+    invoke_native!("vkDeviceWaitIdle", NativeFn, device)
+}
+
+pub unsafe extern "win64" fn guest_vkQueueWaitIdle(queue: *mut c_void) -> i32 {
+    type NativeFn = unsafe extern "C" fn(*mut c_void) -> i32;
+    invoke_native!("vkQueueWaitIdle", NativeFn, queue)
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 8: Synchronization Primitives
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCreateSemaphore(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_semaphore: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateSemaphore",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_semaphore
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroySemaphore(
+    device: NativeVkDevice,
+    semaphore: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroySemaphore",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        semaphore,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreateFence(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_fence: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateFence",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_fence
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyFence(
+    device: NativeVkDevice,
+    fence: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyFence",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        fence,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkWaitForFences(
+    device: NativeVkDevice,
+    fence_count: u32,
+    p_fences: *const u64,
+    wait_all: u32,
+    timeout: u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u32, *const u64, u32, u64) -> i32;
+    invoke_native!(
+        "vkWaitForFences",
+        NativeFn,
+        device,
+        fence_count,
+        p_fences,
+        wait_all,
+        timeout
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkResetFences(
+    device: NativeVkDevice,
+    fence_count: u32,
+    p_fences: *const u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u32, *const u64) -> i32;
+    invoke_native!("vkResetFences", NativeFn, device, fence_count, p_fences)
+}
+
+pub unsafe extern "win64" fn guest_vkCreateEvent(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_event: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateEvent",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_event
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyEvent(
+    device: NativeVkDevice,
+    event: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyEvent",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        event,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetEventStatus(device: NativeVkDevice, event: u64) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64) -> i32;
+    invoke_native!("vkGetEventStatus", NativeFn, device, event)
+}
+
+pub unsafe extern "win64" fn guest_vkSetEvent(device: NativeVkDevice, event: u64) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64) -> i32;
+    invoke_native!("vkSetEvent", NativeFn, device, event)
+}
+
+pub unsafe extern "win64" fn guest_vkResetEvent(device: NativeVkDevice, event: u64) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64) -> i32;
+    invoke_native!("vkResetEvent", NativeFn, device, event)
+}
+
+pub unsafe extern "win64" fn guest_vkGetSemaphoreCounterValue(
+    device: NativeVkDevice,
+    semaphore: u64,
+    p_value: *mut u64,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkGetSemaphoreCounterValue") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, *mut u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, semaphore, p_value)
+    } else if let Some(sym) = get_native_proc_addr("vkGetSemaphoreCounterValueKHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, *mut u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, semaphore, p_value)
+    } else {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkWaitSemaphores(
+    device: NativeVkDevice,
+    p_wait_info: *const c_void,
+    timeout: u64,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkWaitSemaphores") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_wait_info, timeout)
+    } else if let Some(sym) = get_native_proc_addr("vkWaitSemaphoresKHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_wait_info, timeout)
+    } else {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkSignalSemaphore(
+    device: NativeVkDevice,
+    p_signal_info: *const c_void,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkSignalSemaphore") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_signal_info)
+    } else if let Some(sym) = get_native_proc_addr("vkSignalSemaphoreKHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_signal_info)
+    } else {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 9: Memory Management
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkAllocateMemory(
+    device: NativeVkDevice,
+    p_allocate_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_memory: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkAllocateMemory",
+        NativeFn,
+        device,
+        p_allocate_info,
+        std::ptr::null(),
+        p_memory
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkFreeMemory(
+    device: NativeVkDevice,
+    memory: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkFreeMemory",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        memory,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkMapMemory(
+    device: NativeVkDevice,
+    memory: u64,
+    offset: u64,
+    size: u64,
+    flags: u32,
+    pp_data: *mut *mut c_void,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, u64, u64, u64, u32, *mut *mut c_void) -> i32;
+    invoke_native!(
+        "vkMapMemory",
+        NativeFn,
+        device,
+        memory,
+        offset,
+        size,
+        flags,
+        pp_data
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkUnmapMemory(device: NativeVkDevice, memory: u64) {
+    invoke_native_void!(
+        "vkUnmapMemory",
+        unsafe extern "C" fn(NativeVkDevice, u64),
+        device,
+        memory
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkFlushMappedMemoryRanges(
+    device: NativeVkDevice,
+    memory_range_count: u32,
+    p_memory_ranges: *const c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u32, *const c_void) -> i32;
+    invoke_native!(
+        "vkFlushMappedMemoryRanges",
+        NativeFn,
+        device,
+        memory_range_count,
+        p_memory_ranges
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkInvalidateMappedMemoryRanges(
+    device: NativeVkDevice,
+    memory_range_count: u32,
+    p_memory_ranges: *const c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u32, *const c_void) -> i32;
+    invoke_native!(
+        "vkInvalidateMappedMemoryRanges",
+        NativeFn,
+        device,
+        memory_range_count,
+        p_memory_ranges
+    )
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 10: Buffer & Image Resources
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCreateBuffer(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_buffer: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateBuffer",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_buffer
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyBuffer(
+    device: NativeVkDevice,
+    buffer: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyBuffer",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        buffer,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreateImage(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_image: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateImage",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_image
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyImage(
+    device: NativeVkDevice,
+    image: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyImage",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        image,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreateImageView(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_view: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateImageView",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_view
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyImageView(
+    device: NativeVkDevice,
+    view: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyImageView",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        view,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreateBufferView(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_view: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateBufferView",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_view
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyBufferView(
+    device: NativeVkDevice,
+    view: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyBufferView",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        view,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetBufferMemoryRequirements(
+    device: NativeVkDevice,
+    buffer: u64,
+    p_reqs: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetBufferMemoryRequirements",
+        unsafe extern "C" fn(NativeVkDevice, u64, *mut c_void),
+        device,
+        buffer,
+        p_reqs
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetBufferMemoryRequirements2(
+    device: NativeVkDevice,
+    p_info: *const c_void,
+    p_reqs: *mut c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkGetBufferMemoryRequirements2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_info, p_reqs);
+    } else if let Some(sym) = get_native_proc_addr("vkGetBufferMemoryRequirements2KHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_info, p_reqs);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetImageMemoryRequirements(
+    device: NativeVkDevice,
+    image: u64,
+    p_reqs: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetImageMemoryRequirements",
+        unsafe extern "C" fn(NativeVkDevice, u64, *mut c_void),
+        device,
+        image,
+        p_reqs
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetImageMemoryRequirements2(
+    device: NativeVkDevice,
+    p_info: *const c_void,
+    p_reqs: *mut c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkGetImageMemoryRequirements2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_info, p_reqs);
+    } else if let Some(sym) = get_native_proc_addr("vkGetImageMemoryRequirements2KHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_info, p_reqs);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkBindBufferMemory(
+    device: NativeVkDevice,
+    buffer: u64,
+    memory: u64,
+    offset: u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u64, u64) -> i32;
+    invoke_native!(
+        "vkBindBufferMemory",
+        NativeFn,
+        device,
+        buffer,
+        memory,
+        offset
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkBindBufferMemory2(
+    device: NativeVkDevice,
+    bind_count: u32,
+    p_bind_infos: *const c_void,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkBindBufferMemory2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u32, *const c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, bind_count, p_bind_infos)
+    } else if let Some(sym) = get_native_proc_addr("vkBindBufferMemory2KHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u32, *const c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, bind_count, p_bind_infos)
+    } else {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkBindImageMemory(
+    device: NativeVkDevice,
+    image: u64,
+    memory: u64,
+    offset: u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u64, u64) -> i32;
+    invoke_native!("vkBindImageMemory", NativeFn, device, image, memory, offset)
+}
+
+pub unsafe extern "win64" fn guest_vkBindImageMemory2(
+    device: NativeVkDevice,
+    bind_count: u32,
+    p_bind_infos: *const c_void,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkBindImageMemory2") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u32, *const c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, bind_count, p_bind_infos)
+    } else if let Some(sym) = get_native_proc_addr("vkBindImageMemory2KHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u32, *const c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, bind_count, p_bind_infos)
+    } else {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetImageSubresourceLayout(
+    device: NativeVkDevice,
+    image: u64,
+    p_subresource: *const c_void,
+    p_layout: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetImageSubresourceLayout",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void, *mut c_void),
+        device,
+        image,
+        p_subresource,
+        p_layout
+    );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 11: Command Pools & Command Buffers
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCreateCommandPool(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_command_pool: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateCommandPool",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_command_pool
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyCommandPool(
+    device: NativeVkDevice,
+    command_pool: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyCommandPool",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        command_pool,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkResetCommandPool(
+    device: NativeVkDevice,
+    command_pool: u64,
+    flags: u32,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u32) -> i32;
+    invoke_native!("vkResetCommandPool", NativeFn, device, command_pool, flags)
+}
+
+pub unsafe extern "win64" fn guest_vkAllocateCommandBuffers(
+    device: NativeVkDevice,
+    p_allocate_info: *const c_void,
+    p_command_buffers: *mut *mut c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut *mut c_void) -> i32;
+    invoke_native!(
+        "vkAllocateCommandBuffers",
+        NativeFn,
+        device,
+        p_allocate_info,
+        p_command_buffers
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkFreeCommandBuffers(
+    device: NativeVkDevice,
+    command_pool: u64,
+    count: u32,
+    p_command_buffers: *const *mut c_void,
+) {
+    invoke_native_void!(
+        "vkFreeCommandBuffers",
+        unsafe extern "C" fn(NativeVkDevice, u64, u32, *const *mut c_void),
+        device,
+        command_pool,
+        count,
+        p_command_buffers
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkBeginCommandBuffer(
+    command_buffer: *mut c_void,
+    p_begin_info: *const c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void) -> i32;
+    invoke_native!(
+        "vkBeginCommandBuffer",
+        NativeFn,
+        command_buffer,
+        p_begin_info
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkEndCommandBuffer(command_buffer: *mut c_void) -> i32 {
+    type NativeFn = unsafe extern "C" fn(*mut c_void) -> i32;
+    invoke_native!("vkEndCommandBuffer", NativeFn, command_buffer)
+}
+
+pub unsafe extern "win64" fn guest_vkResetCommandBuffer(
+    command_buffer: *mut c_void,
+    flags: u32,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(*mut c_void, u32) -> i32;
+    invoke_native!("vkResetCommandBuffer", NativeFn, command_buffer, flags)
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 12: Render Pass & Framebuffer
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCreateRenderPass(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_render_pass: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateRenderPass",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_render_pass
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkCreateRenderPass2(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_render_pass: *mut u64,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkCreateRenderPass2") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_create_info, std::ptr::null(), p_render_pass)
+    } else if let Some(sym) = get_native_proc_addr("vkCreateRenderPass2KHR") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_create_info, std::ptr::null(), p_render_pass)
+    } else {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyRenderPass(
+    device: NativeVkDevice,
+    render_pass: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyRenderPass",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        render_pass,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreateFramebuffer(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_framebuffer: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateFramebuffer",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_framebuffer
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyFramebuffer(
+    device: NativeVkDevice,
+    framebuffer: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyFramebuffer",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        framebuffer,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetRenderAreaGranularity(
+    device: NativeVkDevice,
+    render_pass: u64,
+    p_granularity: *mut c_void,
+) {
+    invoke_native_void!(
+        "vkGetRenderAreaGranularity",
+        unsafe extern "C" fn(NativeVkDevice, u64, *mut c_void),
+        device,
+        render_pass,
+        p_granularity
+    );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 13: Pipeline
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCreateShaderModule(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_shader_module: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateShaderModule",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_shader_module
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyShaderModule(
+    device: NativeVkDevice,
+    shader_module: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyShaderModule",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        shader_module,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreatePipelineCache(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_cache: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreatePipelineCache",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_cache
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyPipelineCache(
+    device: NativeVkDevice,
+    cache: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyPipelineCache",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        cache,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetPipelineCacheData(
+    device: NativeVkDevice,
+    cache: u64,
+    p_data_size: *mut usize,
+    p_data: *mut c_void,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, *mut usize, *mut c_void) -> i32;
+    invoke_native!(
+        "vkGetPipelineCacheData",
+        NativeFn,
+        device,
+        cache,
+        p_data_size,
+        p_data
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkMergePipelineCaches(
+    device: NativeVkDevice,
+    dst: u64,
+    count: u32,
+    p_src_caches: *const u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u32, *const u64) -> i32;
+    invoke_native!(
+        "vkMergePipelineCaches",
+        NativeFn,
+        device,
+        dst,
+        count,
+        p_src_caches
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkCreatePipelineLayout(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_layout: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreatePipelineLayout",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_layout
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyPipelineLayout(
+    device: NativeVkDevice,
+    layout: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyPipelineLayout",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        layout,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreateGraphicsPipelines(
+    device: NativeVkDevice,
+    pipeline_cache: u64,
+    count: u32,
+    p_create_infos: *const c_void,
+    _p_allocator: *const c_void,
+    p_pipelines: *mut u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(
+        NativeVkDevice,
+        u64,
+        u32,
+        *const c_void,
+        *const c_void,
+        *mut u64,
+    ) -> i32;
+    invoke_native!(
+        "vkCreateGraphicsPipelines",
+        NativeFn,
+        device,
+        pipeline_cache,
+        count,
+        p_create_infos,
+        std::ptr::null(),
+        p_pipelines
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkCreateComputePipelines(
+    device: NativeVkDevice,
+    pipeline_cache: u64,
+    count: u32,
+    p_create_infos: *const c_void,
+    _p_allocator: *const c_void,
+    p_pipelines: *mut u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(
+        NativeVkDevice,
+        u64,
+        u32,
+        *const c_void,
+        *const c_void,
+        *mut u64,
+    ) -> i32;
+    invoke_native!(
+        "vkCreateComputePipelines",
+        NativeFn,
+        device,
+        pipeline_cache,
+        count,
+        p_create_infos,
+        std::ptr::null(),
+        p_pipelines
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyPipeline(
+    device: NativeVkDevice,
+    pipeline: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyPipeline",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        pipeline,
+        std::ptr::null()
+    );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 14: Descriptors
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCreateDescriptorSetLayout(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_layout: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateDescriptorSetLayout",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_layout
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyDescriptorSetLayout(
+    device: NativeVkDevice,
+    layout: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyDescriptorSetLayout",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        layout,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreateDescriptorPool(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_pool: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateDescriptorPool",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_pool
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyDescriptorPool(
+    device: NativeVkDevice,
+    pool: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyDescriptorPool",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        pool,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkResetDescriptorPool(
+    device: NativeVkDevice,
+    pool: u64,
+    flags: u32,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u32) -> i32;
+    invoke_native!("vkResetDescriptorPool", NativeFn, device, pool, flags)
+}
+
+pub unsafe extern "win64" fn guest_vkAllocateDescriptorSets(
+    device: NativeVkDevice,
+    p_allocate_info: *const c_void,
+    p_descriptor_sets: *mut u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkAllocateDescriptorSets",
+        NativeFn,
+        device,
+        p_allocate_info,
+        p_descriptor_sets
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkFreeDescriptorSets(
+    device: NativeVkDevice,
+    pool: u64,
+    count: u32,
+    p_sets: *const u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u32, *const u64) -> i32;
+    invoke_native!(
+        "vkFreeDescriptorSets",
+        NativeFn,
+        device,
+        pool,
+        count,
+        p_sets
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkUpdateDescriptorSets(
+    device: NativeVkDevice,
+    write_count: u32,
+    p_writes: *const c_void,
+    copy_count: u32,
+    p_copies: *const c_void,
+) {
+    invoke_native_void!(
+        "vkUpdateDescriptorSets",
+        unsafe extern "C" fn(NativeVkDevice, u32, *const c_void, u32, *const c_void),
+        device,
+        write_count,
+        p_writes,
+        copy_count,
+        p_copies
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreateDescriptorUpdateTemplate(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_template: *mut u64,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkCreateDescriptorUpdateTemplate") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_create_info, std::ptr::null(), p_template)
+    } else if let Some(sym) = get_native_proc_addr("vkCreateDescriptorUpdateTemplateKHR") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_create_info, std::ptr::null(), p_template)
+    } else {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyDescriptorUpdateTemplate(
+    device: NativeVkDevice,
+    template: u64,
+    _p_allocator: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkDestroyDescriptorUpdateTemplate") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, template, std::ptr::null());
+    } else if let Some(sym) = get_native_proc_addr("vkDestroyDescriptorUpdateTemplateKHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, template, std::ptr::null());
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkUpdateDescriptorSetWithTemplate(
+    device: NativeVkDevice,
+    descriptor_set: u64,
+    template: u64,
+    p_data: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkUpdateDescriptorSetWithTemplate") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u64, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, descriptor_set, template, p_data);
+    } else if let Some(sym) = get_native_proc_addr("vkUpdateDescriptorSetWithTemplateKHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u64, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, descriptor_set, template, p_data);
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 15: Sampler & Query Pool
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCreateSampler(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_sampler: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateSampler",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_sampler
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroySampler(
+    device: NativeVkDevice,
+    sampler: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroySampler",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        sampler,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCreateQueryPool(
+    device: NativeVkDevice,
+    p_create_info: *const c_void,
+    _p_allocator: *const c_void,
+    p_pool: *mut u64,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+    invoke_native!(
+        "vkCreateQueryPool",
+        NativeFn,
+        device,
+        p_create_info,
+        std::ptr::null(),
+        p_pool
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkDestroyQueryPool(
+    device: NativeVkDevice,
+    pool: u64,
+    _p_allocator: *const c_void,
+) {
+    invoke_native_void!(
+        "vkDestroyQueryPool",
+        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
+        device,
+        pool,
+        std::ptr::null()
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkGetQueryPoolResults(
+    device: NativeVkDevice,
+    pool: u64,
+    first_query: u32,
+    query_count: u32,
+    data_size: usize,
+    p_data: *mut c_void,
+    stride: u64,
+    flags: u32,
+) -> i32 {
+    type NativeFn =
+        unsafe extern "C" fn(NativeVkDevice, u64, u32, u32, usize, *mut c_void, u64, u32) -> i32;
+    invoke_native!(
+        "vkGetQueryPoolResults",
+        NativeFn,
+        device,
+        pool,
+        first_query,
+        query_count,
+        data_size,
+        p_data,
+        stride,
+        flags
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkResetQueryPool(
+    device: NativeVkDevice,
+    pool: u64,
+    first: u32,
+    count: u32,
+) {
+    if let Some(sym) = get_native_proc_addr("vkResetQueryPool") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u32, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, pool, first, count);
+    } else if let Some(sym) = get_native_proc_addr("vkResetQueryPoolEXT") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u32, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, pool, first, count);
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 16: Command Buffer Recording (Cmd* commands)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkCmdBindPipeline(
+    cb: *mut c_void,
+    bind_point: u32,
+    pipeline: u64,
+) {
+    invoke_native_void!(
+        "vkCmdBindPipeline",
+        unsafe extern "C" fn(*mut c_void, u32, u64),
+        cb,
+        bind_point,
+        pipeline
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetViewport(
+    cb: *mut c_void,
+    first: u32,
+    count: u32,
+    p_viewports: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdSetViewport",
+        unsafe extern "C" fn(*mut c_void, u32, u32, *const c_void),
+        cb,
+        first,
+        count,
+        p_viewports
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetScissor(
+    cb: *mut c_void,
+    first: u32,
+    count: u32,
+    p_scissors: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdSetScissor",
+        unsafe extern "C" fn(*mut c_void, u32, u32, *const c_void),
+        cb,
+        first,
+        count,
+        p_scissors
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetLineWidth(cb: *mut c_void, line_width: f32) {
+    invoke_native_void!(
+        "vkCmdSetLineWidth",
+        unsafe extern "C" fn(*mut c_void, f32),
+        cb,
+        line_width
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetDepthBias(
+    cb: *mut c_void,
+    constant: f32,
+    clamp: f32,
+    slope: f32,
+) {
+    invoke_native_void!(
+        "vkCmdSetDepthBias",
+        unsafe extern "C" fn(*mut c_void, f32, f32, f32),
+        cb,
+        constant,
+        clamp,
+        slope
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetBlendConstants(
+    cb: *mut c_void,
+    blend_constants: *const f32,
+) {
+    invoke_native_void!(
+        "vkCmdSetBlendConstants",
+        unsafe extern "C" fn(*mut c_void, *const f32),
+        cb,
+        blend_constants
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetDepthBounds(cb: *mut c_void, min: f32, max: f32) {
+    invoke_native_void!(
+        "vkCmdSetDepthBounds",
+        unsafe extern "C" fn(*mut c_void, f32, f32),
+        cb,
+        min,
+        max
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetStencilCompareMask(
+    cb: *mut c_void,
+    face_mask: u32,
+    compare_mask: u32,
+) {
+    invoke_native_void!(
+        "vkCmdSetStencilCompareMask",
+        unsafe extern "C" fn(*mut c_void, u32, u32),
+        cb,
+        face_mask,
+        compare_mask
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetStencilWriteMask(
+    cb: *mut c_void,
+    face_mask: u32,
+    write_mask: u32,
+) {
+    invoke_native_void!(
+        "vkCmdSetStencilWriteMask",
+        unsafe extern "C" fn(*mut c_void, u32, u32),
+        cb,
+        face_mask,
+        write_mask
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetStencilReference(
+    cb: *mut c_void,
+    face_mask: u32,
+    reference: u32,
+) {
+    invoke_native_void!(
+        "vkCmdSetStencilReference",
+        unsafe extern "C" fn(*mut c_void, u32, u32),
+        cb,
+        face_mask,
+        reference
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBindDescriptorSets(
+    cb: *mut c_void,
+    bind_point: u32,
+    layout: u64,
+    first_set: u32,
+    count: u32,
+    p_sets: *const u64,
+    dyn_offset_count: u32,
+    p_dyn_offsets: *const u32,
+) {
+    invoke_native_void!(
+        "vkCmdBindDescriptorSets",
+        unsafe extern "C" fn(*mut c_void, u32, u64, u32, u32, *const u64, u32, *const u32),
+        cb,
+        bind_point,
+        layout,
+        first_set,
+        count,
+        p_sets,
+        dyn_offset_count,
+        p_dyn_offsets
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBindIndexBuffer(
+    cb: *mut c_void,
+    buffer: u64,
+    offset: u64,
+    index_type: u32,
+) {
+    invoke_native_void!(
+        "vkCmdBindIndexBuffer",
+        unsafe extern "C" fn(*mut c_void, u64, u64, u32),
+        cb,
+        buffer,
+        offset,
+        index_type
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBindVertexBuffers(
+    cb: *mut c_void,
+    first: u32,
+    count: u32,
+    p_buffers: *const u64,
+    p_offsets: *const u64,
+) {
+    invoke_native_void!(
+        "vkCmdBindVertexBuffers",
+        unsafe extern "C" fn(*mut c_void, u32, u32, *const u64, *const u64),
+        cb,
+        first,
+        count,
+        p_buffers,
+        p_offsets
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdDraw(
+    cb: *mut c_void,
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+) {
+    invoke_native_void!(
+        "vkCmdDraw",
+        unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32),
+        cb,
+        vertex_count,
+        instance_count,
+        first_vertex,
+        first_instance
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdDrawIndexed(
+    cb: *mut c_void,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32,
+) {
+    invoke_native_void!(
+        "vkCmdDrawIndexed",
+        unsafe extern "C" fn(*mut c_void, u32, u32, u32, i32, u32),
+        cb,
+        index_count,
+        instance_count,
+        first_index,
+        vertex_offset,
+        first_instance
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdDrawIndirect(
+    cb: *mut c_void,
+    buffer: u64,
+    offset: u64,
+    draw_count: u32,
+    stride: u32,
+) {
+    invoke_native_void!(
+        "vkCmdDrawIndirect",
+        unsafe extern "C" fn(*mut c_void, u64, u64, u32, u32),
+        cb,
+        buffer,
+        offset,
+        draw_count,
+        stride
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdDrawIndexedIndirect(
+    cb: *mut c_void,
+    buffer: u64,
+    offset: u64,
+    draw_count: u32,
+    stride: u32,
+) {
+    invoke_native_void!(
+        "vkCmdDrawIndexedIndirect",
+        unsafe extern "C" fn(*mut c_void, u64, u64, u32, u32),
+        cb,
+        buffer,
+        offset,
+        draw_count,
+        stride
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdDrawIndirectCount(
+    cb: *mut c_void,
+    buffer: u64,
+    offset: u64,
+    count_buffer: u64,
+    count_offset: u64,
+    max_draw_count: u32,
+    stride: u32,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdDrawIndirectCount") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u32, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(
+            cb,
+            buffer,
+            offset,
+            count_buffer,
+            count_offset,
+            max_draw_count,
+            stride,
+        );
+    } else if let Some(sym) = get_native_proc_addr("vkCmdDrawIndirectCountKHR") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u32, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(
+            cb,
+            buffer,
+            offset,
+            count_buffer,
+            count_offset,
+            max_draw_count,
+            stride,
+        );
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdDrawIndexedIndirectCount(
+    cb: *mut c_void,
+    buffer: u64,
+    offset: u64,
+    count_buffer: u64,
+    count_offset: u64,
+    max_draw_count: u32,
+    stride: u32,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdDrawIndexedIndirectCount") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u32, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(
+            cb,
+            buffer,
+            offset,
+            count_buffer,
+            count_offset,
+            max_draw_count,
+            stride,
+        );
+    } else if let Some(sym) = get_native_proc_addr("vkCmdDrawIndexedIndirectCountKHR") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u64, u64, u64, u64, u32, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(
+            cb,
+            buffer,
+            offset,
+            count_buffer,
+            count_offset,
+            max_draw_count,
+            stride,
+        );
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdDispatch(cb: *mut c_void, x: u32, y: u32, z: u32) {
+    invoke_native_void!(
+        "vkCmdDispatch",
+        unsafe extern "C" fn(*mut c_void, u32, u32, u32),
+        cb,
+        x,
+        y,
+        z
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdDispatchIndirect(
+    cb: *mut c_void,
+    buffer: u64,
+    offset: u64,
+) {
+    invoke_native_void!(
+        "vkCmdDispatchIndirect",
+        unsafe extern "C" fn(*mut c_void, u64, u64),
+        cb,
+        buffer,
+        offset
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdCopyBuffer(
+    cb: *mut c_void,
+    src: u64,
+    dst: u64,
+    count: u32,
+    p_regions: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdCopyBuffer",
+        unsafe extern "C" fn(*mut c_void, u64, u64, u32, *const c_void),
+        cb,
+        src,
+        dst,
+        count,
+        p_regions
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdCopyImage(
+    cb: *mut c_void,
+    src: u64,
+    src_layout: u32,
+    dst: u64,
+    dst_layout: u32,
+    count: u32,
+    p_regions: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdCopyImage",
+        unsafe extern "C" fn(*mut c_void, u64, u32, u64, u32, u32, *const c_void),
+        cb,
+        src,
+        src_layout,
+        dst,
+        dst_layout,
+        count,
+        p_regions
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBlitImage(
+    cb: *mut c_void,
+    src: u64,
+    src_layout: u32,
+    dst: u64,
+    dst_layout: u32,
+    count: u32,
+    p_regions: *const c_void,
+    filter: u32,
+) {
+    invoke_native_void!(
+        "vkCmdBlitImage",
+        unsafe extern "C" fn(*mut c_void, u64, u32, u64, u32, u32, *const c_void, u32),
+        cb,
+        src,
+        src_layout,
+        dst,
+        dst_layout,
+        count,
+        p_regions,
+        filter
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdCopyBufferToImage(
+    cb: *mut c_void,
+    src: u64,
+    dst: u64,
+    dst_layout: u32,
+    count: u32,
+    p_regions: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdCopyBufferToImage",
+        unsafe extern "C" fn(*mut c_void, u64, u64, u32, u32, *const c_void),
+        cb,
+        src,
+        dst,
+        dst_layout,
+        count,
+        p_regions
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdCopyImageToBuffer(
+    cb: *mut c_void,
+    src: u64,
+    src_layout: u32,
+    dst: u64,
+    count: u32,
+    p_regions: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdCopyImageToBuffer",
+        unsafe extern "C" fn(*mut c_void, u64, u32, u64, u32, *const c_void),
+        cb,
+        src,
+        src_layout,
+        dst,
+        count,
+        p_regions
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdUpdateBuffer(
+    cb: *mut c_void,
+    dst: u64,
+    offset: u64,
+    size: u64,
+    p_data: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdUpdateBuffer",
+        unsafe extern "C" fn(*mut c_void, u64, u64, u64, *const c_void),
+        cb,
+        dst,
+        offset,
+        size,
+        p_data
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdFillBuffer(
+    cb: *mut c_void,
+    dst: u64,
+    offset: u64,
+    size: u64,
+    data: u32,
+) {
+    invoke_native_void!(
+        "vkCmdFillBuffer",
+        unsafe extern "C" fn(*mut c_void, u64, u64, u64, u32),
+        cb,
+        dst,
+        offset,
+        size,
+        data
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdClearColorImage(
+    cb: *mut c_void,
+    image: u64,
+    layout: u32,
+    p_color: *const c_void,
+    count: u32,
+    p_ranges: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdClearColorImage",
+        unsafe extern "C" fn(*mut c_void, u64, u32, *const c_void, u32, *const c_void),
+        cb,
+        image,
+        layout,
+        p_color,
+        count,
+        p_ranges
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdClearDepthStencilImage(
+    cb: *mut c_void,
+    image: u64,
+    layout: u32,
+    p_depth_stencil: *const c_void,
+    count: u32,
+    p_ranges: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdClearDepthStencilImage",
+        unsafe extern "C" fn(*mut c_void, u64, u32, *const c_void, u32, *const c_void),
+        cb,
+        image,
+        layout,
+        p_depth_stencil,
+        count,
+        p_ranges
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdClearAttachments(
+    cb: *mut c_void,
+    count: u32,
+    p_attachments: *const c_void,
+    rect_count: u32,
+    p_rects: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdClearAttachments",
+        unsafe extern "C" fn(*mut c_void, u32, *const c_void, u32, *const c_void),
+        cb,
+        count,
+        p_attachments,
+        rect_count,
+        p_rects
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdResolveImage(
+    cb: *mut c_void,
+    src: u64,
+    src_layout: u32,
+    dst: u64,
+    dst_layout: u32,
+    count: u32,
+    p_regions: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdResolveImage",
+        unsafe extern "C" fn(*mut c_void, u64, u32, u64, u32, u32, *const c_void),
+        cb,
+        src,
+        src_layout,
+        dst,
+        dst_layout,
+        count,
+        p_regions
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBeginRenderPass(
+    cb: *mut c_void,
+    p_begin_info: *const c_void,
+    contents: u32,
+) {
+    invoke_native_void!(
+        "vkCmdBeginRenderPass",
+        unsafe extern "C" fn(*mut c_void, *const c_void, u32),
+        cb,
+        p_begin_info,
+        contents
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdNextSubpass(cb: *mut c_void, contents: u32) {
+    invoke_native_void!(
+        "vkCmdNextSubpass",
+        unsafe extern "C" fn(*mut c_void, u32),
+        cb,
+        contents
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdEndRenderPass(cb: *mut c_void) {
+    invoke_native_void!("vkCmdEndRenderPass", unsafe extern "C" fn(*mut c_void), cb);
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBeginRenderPass2(
+    cb: *mut c_void,
+    p_begin_info: *const c_void,
+    p_subpass_begin: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdBeginRenderPass2") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_begin_info, p_subpass_begin);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdBeginRenderPass2KHR") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_begin_info, p_subpass_begin);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdNextSubpass2(
+    cb: *mut c_void,
+    p_subpass_begin: *const c_void,
+    p_subpass_end: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdNextSubpass2") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_subpass_begin, p_subpass_end);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdNextSubpass2KHR") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_subpass_begin, p_subpass_end);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdEndRenderPass2(
+    cb: *mut c_void,
+    p_subpass_end: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdEndRenderPass2") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_subpass_end);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdEndRenderPass2KHR") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_subpass_end);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdPipelineBarrier(
+    cb: *mut c_void,
+    src_stage: u32,
+    dst_stage: u32,
+    dep_flags: u32,
+    mem_barrier_count: u32,
+    p_mem_barriers: *const c_void,
+    buf_barrier_count: u32,
+    p_buf_barriers: *const c_void,
+    img_barrier_count: u32,
+    p_img_barriers: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdPipelineBarrier",
+        unsafe extern "C" fn(
+            *mut c_void,
+            u32,
+            u32,
+            u32,
+            u32,
+            *const c_void,
+            u32,
+            *const c_void,
+            u32,
+            *const c_void,
+        ),
+        cb,
+        src_stage,
+        dst_stage,
+        dep_flags,
+        mem_barrier_count,
+        p_mem_barriers,
+        buf_barrier_count,
+        p_buf_barriers,
+        img_barrier_count,
+        p_img_barriers
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdPipelineBarrier2(
+    cb: *mut c_void,
+    p_dependency_info: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdPipelineBarrier2") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_dependency_info);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdPipelineBarrier2KHR") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_dependency_info);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdPushConstants(
+    cb: *mut c_void,
+    layout: u64,
+    stage_flags: u32,
+    offset: u32,
+    size: u32,
+    p_values: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdPushConstants",
+        unsafe extern "C" fn(*mut c_void, u64, u32, u32, u32, *const c_void),
+        cb,
+        layout,
+        stage_flags,
+        offset,
+        size,
+        p_values
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdExecuteCommands(
+    cb: *mut c_void,
+    count: u32,
+    p_command_buffers: *const *mut c_void,
+) {
+    invoke_native_void!(
+        "vkCmdExecuteCommands",
+        unsafe extern "C" fn(*mut c_void, u32, *const *mut c_void),
+        cb,
+        count,
+        p_command_buffers
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBeginQuery(
+    cb: *mut c_void,
+    pool: u64,
+    query: u32,
+    flags: u32,
+) {
+    invoke_native_void!(
+        "vkCmdBeginQuery",
+        unsafe extern "C" fn(*mut c_void, u64, u32, u32),
+        cb,
+        pool,
+        query,
+        flags
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdEndQuery(cb: *mut c_void, pool: u64, query: u32) {
+    invoke_native_void!(
+        "vkCmdEndQuery",
+        unsafe extern "C" fn(*mut c_void, u64, u32),
+        cb,
+        pool,
+        query
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdResetQueryPool(
+    cb: *mut c_void,
+    pool: u64,
+    first: u32,
+    count: u32,
+) {
+    invoke_native_void!(
+        "vkCmdResetQueryPool",
+        unsafe extern "C" fn(*mut c_void, u64, u32, u32),
+        cb,
+        pool,
+        first,
+        count
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdWriteTimestamp(
+    cb: *mut c_void,
+    stage: u32,
+    pool: u64,
+    query: u32,
+) {
+    invoke_native_void!(
+        "vkCmdWriteTimestamp",
+        unsafe extern "C" fn(*mut c_void, u32, u64, u32),
+        cb,
+        stage,
+        pool,
+        query
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdCopyQueryPoolResults(
+    cb: *mut c_void,
+    pool: u64,
+    first: u32,
+    count: u32,
+    dst: u64,
+    offset: u64,
+    stride: u64,
+    flags: u32,
+) {
+    invoke_native_void!(
+        "vkCmdCopyQueryPoolResults",
+        unsafe extern "C" fn(*mut c_void, u64, u32, u32, u64, u64, u64, u32),
+        cb,
+        pool,
+        first,
+        count,
+        dst,
+        offset,
+        stride,
+        flags
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetEvent(cb: *mut c_void, event: u64, stage_mask: u32) {
+    invoke_native_void!(
+        "vkCmdSetEvent",
+        unsafe extern "C" fn(*mut c_void, u64, u32),
+        cb,
+        event,
+        stage_mask
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdResetEvent(cb: *mut c_void, event: u64, stage_mask: u32) {
+    invoke_native_void!(
+        "vkCmdResetEvent",
+        unsafe extern "C" fn(*mut c_void, u64, u32),
+        cb,
+        event,
+        stage_mask
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkCmdWaitEvents(
+    cb: *mut c_void,
+    event_count: u32,
+    p_events: *const u64,
+    src_stage: u32,
+    dst_stage: u32,
+    mem_count: u32,
+    p_mem: *const c_void,
+    buf_count: u32,
+    p_buf: *const c_void,
+    img_count: u32,
+    p_img: *const c_void,
+) {
+    invoke_native_void!(
+        "vkCmdWaitEvents",
+        unsafe extern "C" fn(
+            *mut c_void,
+            u32,
+            *const u64,
+            u32,
+            u32,
+            u32,
+            *const c_void,
+            u32,
+            *const c_void,
+            u32,
+            *const c_void,
+        ),
+        cb,
+        event_count,
+        p_events,
+        src_stage,
+        dst_stage,
+        mem_count,
+        p_mem,
+        buf_count,
+        p_buf,
+        img_count,
+        p_img
+    );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Section 17: Utility / Misc device commands used by DXVK
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+pub unsafe extern "win64" fn guest_vkTrimCommandPool(
+    device: NativeVkDevice,
+    pool: u64,
+    flags: u32,
+) {
+    if let Some(sym) = get_native_proc_addr("vkTrimCommandPool") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, pool, flags);
+    } else if let Some(sym) = get_native_proc_addr("vkTrimCommandPoolKHR") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, pool, flags);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkGetDeviceMemoryCommitment(
+    device: NativeVkDevice,
+    memory: u64,
+    p_committed: *mut u64,
+) {
+    invoke_native_void!(
+        "vkGetDeviceMemoryCommitment",
+        unsafe extern "C" fn(NativeVkDevice, u64, *mut u64),
+        device,
+        memory,
+        p_committed
+    );
+}
+
+pub unsafe extern "win64" fn guest_vkQueueBindSparse(
+    queue: *mut c_void,
+    bind_info_count: u32,
+    p_bind_info: *const c_void,
+    fence: u64,
+) -> i32 {
+    type NativeFn = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u64) -> i32;
+    invoke_native!(
+        "vkQueueBindSparse",
+        NativeFn,
+        queue,
+        bind_info_count,
+        p_bind_info,
+        fence
+    )
+}
+
+pub unsafe extern "win64" fn guest_vkGetFenceStatus(device: NativeVkDevice, fence: u64) -> i32 {
+    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64) -> i32;
+    invoke_native!("vkGetFenceStatus", NativeFn, device, fence)
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBindTransformFeedbackBuffersEXT(
+    cb: *mut c_void,
+    first: u32,
+    count: u32,
+    p_buffers: *const u64,
+    p_offsets: *const u64,
+    p_sizes: *const u64,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdBindTransformFeedbackBuffersEXT") {
+        type NativeFn =
+            unsafe extern "C" fn(*mut c_void, u32, u32, *const u64, *const u64, *const u64);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, first, count, p_buffers, p_offsets, p_sizes);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBeginTransformFeedbackEXT(
+    cb: *mut c_void,
+    first: u32,
+    count: u32,
+    p_buffers: *const u64,
+    p_offsets: *const u64,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdBeginTransformFeedbackEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32, u32, *const u64, *const u64);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, first, count, p_buffers, p_offsets);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdEndTransformFeedbackEXT(
+    cb: *mut c_void,
+    first: u32,
+    count: u32,
+    p_buffers: *const u64,
+    p_offsets: *const u64,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdEndTransformFeedbackEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32, u32, *const u64, *const u64);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, first, count, p_buffers, p_offsets);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBeginConditionalRenderingEXT(
+    cb: *mut c_void,
+    p_info: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdBeginConditionalRenderingEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_info);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdEndConditionalRenderingEXT(cb: *mut c_void) {
+    if let Some(sym) = get_native_proc_addr("vkCmdEndConditionalRenderingEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetCullMode(cb: *mut c_void, cull_mode: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetCullMode") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, cull_mode);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetCullModeEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, cull_mode);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetFrontFace(cb: *mut c_void, front_face: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetFrontFace") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, front_face);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetFrontFaceEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, front_face);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetDepthTestEnable(cb: *mut c_void, enable: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetDepthTestEnable") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetDepthTestEnableEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetDepthWriteEnable(cb: *mut c_void, enable: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetDepthWriteEnable") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetDepthWriteEnableEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetDepthCompareOp(cb: *mut c_void, compare_op: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetDepthCompareOp") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, compare_op);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetDepthCompareOpEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, compare_op);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetStencilTestEnable(cb: *mut c_void, enable: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetStencilTestEnable") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetStencilTestEnableEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetStencilOp(
+    cb: *mut c_void,
+    face_mask: u32,
+    fail_op: u32,
+    pass_op: u32,
+    depth_fail_op: u32,
+    compare_op: u32,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetStencilOp") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, face_mask, fail_op, pass_op, depth_fail_op, compare_op);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetStencilOpEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, face_mask, fail_op, pass_op, depth_fail_op, compare_op);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetDepthBoundsTestEnable(cb: *mut c_void, enable: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetDepthBoundsTestEnable") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetDepthBoundsTestEnableEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetPrimitiveTopology(cb: *mut c_void, topology: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetPrimitiveTopology") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, topology);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetPrimitiveTopologyEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, topology);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetPrimitiveRestartEnable(cb: *mut c_void, enable: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetPrimitiveRestartEnable") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetPrimitiveRestartEnableEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetRasterizerDiscardEnable(cb: *mut c_void, enable: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetRasterizerDiscardEnable") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetRasterizerDiscardEnableEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetDepthBiasEnable(cb: *mut c_void, enable: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetDepthBiasEnable") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    } else if let Some(sym) = get_native_proc_addr("vkCmdSetDepthBiasEnableEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, enable);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetLogicOpEXT(cb: *mut c_void, logic_op: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetLogicOpEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, logic_op);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetPatchControlPointsEXT(cb: *mut c_void, count: u32) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetPatchControlPointsEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, count);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetColorWriteEnableEXT(
+    cb: *mut c_void,
+    count: u32,
+    p_enables: *const u32,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetColorWriteEnableEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32, *const u32);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, count, p_enables);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdSetVertexInputEXT(
+    cb: *mut c_void,
+    binding_count: u32,
+    p_bindings: *const c_void,
+    attr_count: u32,
+    p_attrs: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdSetVertexInputEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u32, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, binding_count, p_bindings, attr_count, p_attrs);
+    }
+}
+
+// Debug Utils (used by DXVK for object naming)
+pub unsafe extern "win64" fn guest_vkSetDebugUtilsObjectNameEXT(
+    device: NativeVkDevice,
+    p_name_info: *const c_void,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkSetDebugUtilsObjectNameEXT") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_name_info)
+    } else {
+        VK_SUCCESS // Silently succeed if not available
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdBeginDebugUtilsLabelEXT(
+    cb: *mut c_void,
+    p_label: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdBeginDebugUtilsLabelEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_label);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdEndDebugUtilsLabelEXT(cb: *mut c_void) {
+    if let Some(sym) = get_native_proc_addr("vkCmdEndDebugUtilsLabelEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkCmdInsertDebugUtilsLabelEXT(
+    cb: *mut c_void,
+    p_label: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkCmdInsertDebugUtilsLabelEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(cb, p_label);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkSetDebugUtilsObjectTagEXT(
+    device: NativeVkDevice,
+    p_tag_info: *const c_void,
+) -> i32 {
+    if let Some(sym) = get_native_proc_addr("vkSetDebugUtilsObjectTagEXT") {
+        type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        f(device, p_tag_info)
+    } else {
+        VK_SUCCESS
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkQueueBeginDebugUtilsLabelEXT(
+    queue: *mut c_void,
+    p_label: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkQueueBeginDebugUtilsLabelEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(queue, p_label);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkQueueEndDebugUtilsLabelEXT(queue: *mut c_void) {
+    if let Some(sym) = get_native_proc_addr("vkQueueEndDebugUtilsLabelEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(queue);
+    }
+}
+
+pub unsafe extern "win64" fn guest_vkQueueInsertDebugUtilsLabelEXT(
+    queue: *mut c_void,
+    p_label: *const c_void,
+) {
+    if let Some(sym) = get_native_proc_addr("vkQueueInsertDebugUtilsLabelEXT") {
+        type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+        let f: NativeFn = std::mem::transmute(sym);
+        f(queue, p_label);
+    }
+}
