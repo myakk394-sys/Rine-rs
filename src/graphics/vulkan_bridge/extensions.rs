@@ -37,29 +37,7 @@ pub unsafe extern "win64" fn rine_vkEnumerateInstanceExtensionProperties(
         return res;
     }
 
-    // Check if host has VK_KHR_xlib_surface (prerequisite for our virtual VK_KHR_win32_surface)
-    let has_host_wsi = {
-        let mut temp: Vec<VkExtensionProperties> = vec![
-            VkExtensionProperties {
-                extensionName: [0; VK_MAX_EXTENSION_NAME_SIZE],
-                specVersion: 0,
-            };
-            native_count as usize
-        ];
-        let mut tmp_count = native_count;
-        let r = native_enumerate(p_layer_name, &mut tmp_count, temp.as_mut_ptr());
-        if r == VK_SUCCESS || r == VK_INCOMPLETE {
-            temp.iter().any(|ext| {
-                let name = CStr::from_ptr(ext.extensionName.as_ptr());
-                name.to_bytes() == b"VK_KHR_xlib_surface"
-            })
-        } else {
-            false
-        }
-    };
-
-    // Only add virtual VK_KHR_win32_surface if host has a working WSI backend
-    let virtual_ext_count: u32 = if has_host_wsi { 1 } else { 0 };
+    let virtual_ext_count: u32 = 1;
     let total_count = native_count + virtual_ext_count;
 
     // Count-only query: pProperties is NULL
@@ -78,13 +56,12 @@ pub unsafe extern "win64" fn rine_vkEnumerateInstanceExtensionProperties(
     };
 
     // Step 2: Get native extensions into temp buffer
-    let mut temp_props: Vec<VkExtensionProperties> = vec![
-        VkExtensionProperties {
+    let mut temp_props: Vec<VkExtensionProperties> = (0..native_count)
+        .map(|_| VkExtensionProperties {
             extensionName: [0; VK_MAX_EXTENSION_NAME_SIZE],
             specVersion: 0,
-        };
-        native_count as usize
-    ];
+        })
+        .collect();
     let mut fetch_count = native_count;
     let res2 = native_enumerate(p_layer_name, &mut fetch_count, temp_props.as_mut_ptr());
     if res2 != VK_SUCCESS && res2 != VK_INCOMPLETE {
@@ -92,33 +69,24 @@ pub unsafe extern "win64" fn rine_vkEnumerateInstanceExtensionProperties(
     }
     temp_props.truncate(fetch_count as usize);
 
-    // Remove native VK_KHR_xlib_surface / VK_KHR_xcb_surface from guest-visible list
-    // (DXVK doesn't know about these; it expects VK_KHR_win32_surface)
-    // But keep them since native code still needs them -- actually, DXVK only checks
-    // for VK_KHR_win32_surface, so removing native WSI extensions from the guest view is optional.
-    // For now, expose all native extensions plus our virtual one.
+    // Append virtual VK_KHR_win32_surface
+    let win32_ext_name = b"VK_KHR_win32_surface\0";
+    let mut win32_entry = VkExtensionProperties {
+        extensionName: [0; VK_MAX_EXTENSION_NAME_SIZE],
+        specVersion: VK_KHR_WIN32_SURFACE_SPEC_VERSION,
+    };
+    std::ptr::copy_nonoverlapping(
+        win32_ext_name.as_ptr() as *const c_char,
+        win32_entry.extensionName.as_mut_ptr(),
+        win32_ext_name.len(),
+    );
 
-    // Append virtual VK_KHR_win32_surface if host WSI is available
-    if has_host_wsi {
-        let win32_ext_name = b"VK_KHR_win32_surface\0";
-        let mut win32_entry = VkExtensionProperties {
-            extensionName: [0; VK_MAX_EXTENSION_NAME_SIZE],
-            specVersion: VK_KHR_WIN32_SURFACE_SPEC_VERSION,
-        };
-        std::ptr::copy_nonoverlapping(
-            win32_ext_name.as_ptr() as *const c_char,
-            win32_entry.extensionName.as_mut_ptr(),
-            win32_ext_name.len(),
-        );
-
-        // Check for duplicates (shouldn't happen, but belt-and-suspenders)
-        let already_exists = temp_props.iter().any(|ext| {
-            let name = CStr::from_ptr(ext.extensionName.as_ptr());
-            name.to_bytes() == b"VK_KHR_win32_surface"
-        });
-        if !already_exists {
-            temp_props.push(win32_entry);
-        }
+    let already_exists = temp_props.iter().any(|ext| {
+        let name = CStr::from_ptr(ext.extensionName.as_ptr());
+        name.to_bytes() == b"VK_KHR_win32_surface"
+    });
+    if !already_exists {
+        temp_props.push(win32_entry);
     }
 
     let actual_total = temp_props.len();
@@ -205,11 +173,11 @@ pub unsafe extern "win64" fn rine_vkCreateInstance(
 
     let new_create_info = VkInstanceCreateInfo {
         sType: info.sType,
-        pNext: info.pNext,
+        pNext: std::ptr::null(),
         flags: info.flags,
         pApplicationInfo: info.pApplicationInfo,
-        enabledLayerCount: info.enabledLayerCount,
-        ppEnabledLayerNames: info.ppEnabledLayerNames,
+        enabledLayerCount: 0,
+        ppEnabledLayerNames: std::ptr::null(),
         enabledExtensionCount: ext_ptrs.len() as u32,
         ppEnabledExtensionNames: ext_ptrs.as_ptr(),
     };

@@ -4,6 +4,9 @@ use crate::sys::{NtStatus, STATUS_SUCCESS};
 pub type ID3D11Device = u64;
 pub type ID3D11DeviceContext = u64;
 
+const E_NOINTERFACE: i32 = 0x8000_4002u32 as i32;
+const E_NOTIMPL: i32 = 0x8000_4001u32 as i32;
+
 #[no_mangle]
 pub unsafe extern "win64" fn D3D11CreateDevice(
     p_adapter: *mut std::ffi::c_void,
@@ -36,13 +39,29 @@ pub unsafe extern "win64" fn D3D11CreateDevice(
 
 unsafe extern "win64" fn d3d11_device_query_interface(
     this: *mut std::ffi::c_void,
-    _riid: *const u8,
+    riid: *const u8,
     ppv: *mut *mut std::ffi::c_void,
 ) -> i32 {
-    if !ppv.is_null() {
-        *ppv = this;
-        com_object_add_ref(this);
+    if ppv.is_null() {
+        return E_NOINTERFACE;
     }
+
+    *ppv = std::ptr::null_mut();
+    if riid.is_null() || this.is_null() {
+        return E_NOINTERFACE;
+    }
+
+    let iid = std::slice::from_raw_parts(riid, 16);
+    const IID_IUNKNOWN: [u8; 16] = [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x46,
+    ];
+    if iid != IID_IUNKNOWN {
+        return E_NOINTERFACE;
+    }
+
+    *ppv = this;
+    com_object_add_ref(this);
     0
 }
 
@@ -91,7 +110,15 @@ pub struct MockComObject {
     pub extra_data: [u8; 208],
 }
 
-pub fn allocate_mock_com_object(vtable: usize) -> *mut std::ffi::c_void {
+pub fn allocate_mock_com_object_with_meta(
+    vtable: usize,
+    creator_symbol: &'static str,
+    interface_name: &'static str,
+    clsid: &str,
+    iid: &str,
+    vtable_slot_count: usize,
+    initialized_slots: Vec<usize>,
+) -> *mut std::ffi::c_void {
     let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
     unsafe {
         let res = libc::posix_memalign(&mut ptr, 16, std::mem::size_of::<MockComObject>());
@@ -104,9 +131,33 @@ pub fn allocate_mock_com_object(vtable: usize) -> *mut std::ffi::c_void {
             (*obj).mapped_pdata = crate::dlls::registry::get_dummy_stub_buffer_ptr();
             (*obj).mapped_row_pitch = 4096;
             (*obj).mapped_depth_pitch = 4096;
+
+            crate::dlls::object_registry::register_rine_object(
+                ptr as u64,
+                vtable as u64,
+                creator_symbol,
+                clsid,
+                iid,
+                interface_name,
+                std::mem::size_of::<MockComObject>(),
+                vtable_slot_count,
+                initialized_slots,
+            );
         }
     }
     ptr
+}
+
+pub fn allocate_mock_com_object(vtable: usize) -> *mut std::ffi::c_void {
+    allocate_mock_com_object_with_meta(
+        vtable,
+        "d3d11/com_object",
+        "IUnknown/ID3D11Object",
+        "",
+        "",
+        30,
+        vec![0, 1, 2],
+    )
 }
 
 pub unsafe extern "win64" fn d3d11_get_device_stub(
@@ -144,36 +195,19 @@ pub unsafe extern "win64" fn d3d11_unmap_stub(
     // Unmap successful
 }
 
-unsafe extern "win64" fn d3d11_stub_success(
+unsafe extern "win64" fn d3d11_method_not_implemented(
     _this: *mut std::ffi::c_void,
-    p1: usize,
-    p2: usize,
-    p3: usize,
-    p4: usize,
-    p5: usize,
-    p6: usize,
-    p7: usize,
-    p8: usize,
-    p9: usize,
+    _p1: usize,
+    _p2: usize,
+    _p3: usize,
+    _p4: usize,
+    _p5: usize,
+    _p6: usize,
+    _p7: usize,
+    _p8: usize,
+    _p9: usize,
 ) -> i32 {
-    let args = [p1, p2, p3, p4, p5, p6, p7, p8, p9];
-    for &arg in &args {
-        if arg > 0x10000 && arg < 0x00007fffffffffff {
-            let ptr_val = arg as *mut *mut std::ffi::c_void;
-            if let Ok(target) = std::panic::catch_unwind(|| *ptr_val) {
-                if target.is_null() || (target as usize) <= 0x10000 {
-                    let vtable_ptr = get_d3d11_device_vtable() as usize;
-                    let mock_obj = allocate_mock_com_object(vtable_ptr);
-                    if !mock_obj.is_null() {
-                        unsafe {
-                            *ptr_val = mock_obj;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    0 // S_OK
+    E_NOTIMPL
 }
 
 static mut D3D11_DEVICE_VTABLE: [*const (); 60] = [std::ptr::null(); 60];
@@ -186,7 +220,7 @@ fn get_d3d11_device_vtable() -> *const *const () {
         D3D11_DEVICE_VTABLE[1] = com_object_add_ref as *const ();
         D3D11_DEVICE_VTABLE[2] = com_object_release as *const ();
         for i in 3..60 {
-            D3D11_DEVICE_VTABLE[i] = d3d11_stub_success as *const ();
+            D3D11_DEVICE_VTABLE[i] = d3d11_method_not_implemented as *const ();
         }
         D3D11_DEVICE_VTABLE[40] = d3d11_get_device_stub as *const (); // GetImmediateContext (Index 40)
     });
@@ -217,7 +251,7 @@ fn get_d3d11_context_vtable() -> *const *const () {
         D3D11_CONTEXT_VTABLE[2] = com_object_release as *const ();
         D3D11_CONTEXT_VTABLE[3] = d3d11_get_device_stub as *const ();
         for i in 4..140 {
-            D3D11_CONTEXT_VTABLE[i] = d3d11_stub_success as *const ();
+            D3D11_CONTEXT_VTABLE[i] = d3d11_method_not_implemented as *const ();
         }
         // Exact Wine ID3D11DeviceContext method indices from d3d11.idl
         D3D11_CONTEXT_VTABLE[14] = d3d11_map_stub as *const (); // Map method (Index 14)
@@ -283,7 +317,7 @@ fn get_swap_chain_vtable() -> *const *const () {
         SWAPCHAIN_VTABLE[1] = com_object_add_ref as *const ();
         SWAPCHAIN_VTABLE[2] = com_object_release as *const ();
         for i in 3..30 {
-            SWAPCHAIN_VTABLE[i] = d3d11_stub_success as *const ();
+            SWAPCHAIN_VTABLE[i] = d3d11_method_not_implemented as *const ();
         }
         SWAPCHAIN_VTABLE[7] = swapchain_get_device_stub as *const (); // GetDevice (Index 7)
         SWAPCHAIN_VTABLE[8] = swapchain_present_stub as *const (); // Present (Index 8)

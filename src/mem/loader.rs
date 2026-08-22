@@ -202,7 +202,8 @@ impl LoadedModule {
                 let full_symbol_name = format!("{}!{}", dll_name, fn_name);
                 let slot_addr = allocated_base as u64 + iat_thunk_rva as u64;
                 let resolved_addr =
-                    crate::pe::imports::IatSymbolResolver::resolve_symbol(dll_name, fn_name)
+                    crate::providers::RineApiResolver::resolve_symbol(dll_name, fn_name)
+                        .map(|res| res.address as usize)
                         .unwrap_or_else(|| {
                             crate::pe::imports::create_unresolved_stub(
                                 name,

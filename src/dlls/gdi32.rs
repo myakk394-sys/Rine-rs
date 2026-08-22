@@ -3,18 +3,18 @@ pub type HDC = u64;
 pub type HBITMAP = u64;
 pub type HGDIOBJ = u64;
 
-pub unsafe extern "system" fn GetDC(hwnd: u64) -> HDC {
+pub unsafe extern "win64" fn GetDC(hwnd: u64) -> HDC {
     let hdc = if hwnd == 0 { 0x00010001 } else { hwnd + 0x10 };
     println!("[GDI32] GetDC: HWND=0x{:X} -> HDC=0x{:X}", hwnd, hdc);
     hdc
 }
 
-pub unsafe extern "system" fn ReleaseDC(hwnd: u64, hdc: HDC) -> i32 {
+pub unsafe extern "win64" fn ReleaseDC(hwnd: u64, hdc: HDC) -> i32 {
     println!("[GDI32] ReleaseDC: HWND=0x{:X}, HDC=0x{:X}", hwnd, hdc);
     1
 }
 
-pub unsafe extern "system" fn CreateCompatibleDC(hdc: HDC) -> HDC {
+pub unsafe extern "win64" fn CreateCompatibleDC(hdc: HDC) -> HDC {
     let new_dc = hdc + 1;
     println!(
         "[GDI32] CreateCompatibleDC: Base HDC=0x{:X} -> New HDC=0x{:X}",
@@ -23,7 +23,7 @@ pub unsafe extern "system" fn CreateCompatibleDC(hdc: HDC) -> HDC {
     new_dc
 }
 
-pub unsafe extern "system" fn CreateCompatibleBitmap(hdc: HDC, width: i32, height: i32) -> HBITMAP {
+pub unsafe extern "win64" fn CreateCompatibleBitmap(hdc: HDC, width: i32, height: i32) -> HBITMAP {
     let hbmp = 0x00020001u64;
     println!(
         "[GDI32] CreateCompatibleBitmap: HDC=0x{:X}, Size=({}x{}) -> HBITMAP=0x{:X}",
@@ -32,7 +32,24 @@ pub unsafe extern "system" fn CreateCompatibleBitmap(hdc: HDC, width: i32, heigh
     hbmp
 }
 
-pub unsafe extern "system" fn SelectObject(hdc: HDC, hobj: HGDIOBJ) -> HGDIOBJ {
+pub unsafe extern "win64" fn CreateBitmap(
+    width: i32,
+    height: i32,
+    planes: u32,
+    bit_count: u32,
+    _bits: *const u8,
+) -> HBITMAP {
+    static NEXT_HBITMAP: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0x00020001);
+    let hbmp = NEXT_HBITMAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    println!(
+        "[GDI32] CreateBitmap: Size=({}x{}), Planes={}, BPP={} -> HBITMAP=0x{:X}",
+        width, height, planes, bit_count, hbmp
+    );
+    hbmp
+}
+
+pub unsafe extern "win64" fn SelectObject(hdc: HDC, hobj: HGDIOBJ) -> HGDIOBJ {
     println!(
         "[GDI32] SelectObject: HDC=0x{:X}, HGDIOBJ=0x{:X}",
         hdc, hobj
@@ -40,12 +57,57 @@ pub unsafe extern "system" fn SelectObject(hdc: HDC, hobj: HGDIOBJ) -> HGDIOBJ {
     hobj
 }
 
-pub unsafe extern "system" fn SwapBuffers(_hdc: HDC) -> i32 {
+pub unsafe extern "win64" fn DeleteObject(hobj: HGDIOBJ) -> i32 {
+    println!("[GDI32] DeleteObject: HGDIOBJ=0x{:X} -> 1", hobj);
+    1
+}
+
+pub unsafe extern "win64" fn CreateDIBSection(
+    _hdc: HDC,
+    pbmi: *const u8,
+    _usage: u32,
+    ppv_bits: *mut *mut u8,
+    _h_section: u64,
+    _offset: u32,
+) -> HBITMAP {
+    static NEXT_HBITMAP: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0x00020001);
+    let hbmp = NEXT_HBITMAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let mut size: usize = 1024 * 1024 * 4; // default 4MB
+    if !pbmi.is_null() {
+        let bi_width = *(pbmi.add(4) as *const i32);
+        let bi_height = (*(pbmi.add(8) as *const i32)).abs();
+        let bi_bit_count = *(pbmi.add(14) as *const u16) as usize;
+        let bpp = if bi_bit_count == 0 { 32 } else { bi_bit_count };
+        let calculated =
+            (bi_width.unsigned_abs() as usize) * (bi_height as usize) * (bpp / 8).max(1);
+        if calculated > 0 && calculated < 100 * 1024 * 1024 {
+            size = calculated;
+        }
+    }
+
+    let mem = libc::malloc(size) as *mut u8;
+    if !mem.is_null() {
+        std::ptr::write_bytes(mem, 0, size);
+    }
+    if !ppv_bits.is_null() {
+        *ppv_bits = mem;
+    }
+
+    println!(
+        "[GDI32] CreateDIBSection -> HBITMAP=0x{:X}, bits={:p}, size={}",
+        hbmp, mem, size
+    );
+    hbmp
+}
+
+pub unsafe extern "win64" fn SwapBuffers(_hdc: HDC) -> i32 {
     println!("[GDI32 GRAPHICS] SwapBuffers: Swapped rendered frame to physical desktop display.");
     1
 }
 
-pub unsafe extern "system" fn BitBlt(
+pub unsafe extern "win64" fn BitBlt(
     _hdc_dest: HDC,
     _x: i32,
     _y: i32,
@@ -60,7 +122,7 @@ pub unsafe extern "system" fn BitBlt(
     1
 }
 
-pub unsafe extern "system" fn StretchDIBits(
+pub unsafe extern "win64" fn StretchDIBits(
     _hdc: HDC,
     _xd: i32,
     _yd: i32,
@@ -85,7 +147,7 @@ pub unsafe extern "system" fn StretchDIBits(
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn GetDeviceCaps(_hdc: u64, index: i32) -> i32 {
+pub unsafe extern "win64" fn GetDeviceCaps(_hdc: u64, index: i32) -> i32 {
     match index {
         8 => 1280, // HORZRES
         10 => 720, // VERTRES
@@ -95,15 +157,15 @@ pub unsafe extern "system" fn GetDeviceCaps(_hdc: u64, index: i32) -> i32 {
     }
 }
 
-pub unsafe extern "system" fn ChoosePixelFormat(_hdc: HDC, _pfd: u64) -> i32 {
+pub unsafe extern "win64" fn ChoosePixelFormat(_hdc: HDC, _pfd: u64) -> i32 {
     1
 }
 
-pub unsafe extern "system" fn SetPixelFormat(_hdc: HDC, _format: i32, _pfd: u64) -> i32 {
+pub unsafe extern "win64" fn SetPixelFormat(_hdc: HDC, _format: i32, _pfd: u64) -> i32 {
     1
 }
 
-pub unsafe extern "system" fn wglCreateContext(hdc: HDC) -> u64 {
+pub unsafe extern "win64" fn wglCreateContext(hdc: HDC) -> u64 {
     println!(
         "[OPENGL WGL] wglCreateContext(HDC 0x{:X}) -> HGLRC 0x00030001",
         hdc
@@ -111,7 +173,7 @@ pub unsafe extern "system" fn wglCreateContext(hdc: HDC) -> u64 {
     0x00030001
 }
 
-pub unsafe extern "system" fn wglMakeCurrent(hdc: HDC, hglrc: u64) -> i32 {
+pub unsafe extern "win64" fn wglMakeCurrent(hdc: HDC, hglrc: u64) -> i32 {
     println!(
         "[OPENGL WGL] wglMakeCurrent(HDC 0x{:X}, HGLRC 0x{:X}) -> Success",
         hdc, hglrc
@@ -124,7 +186,7 @@ extern "C" {
     pub fn glXGetProcAddress(proc_name: *const libc::c_char) -> *mut std::ffi::c_void;
 }
 
-pub unsafe extern "system" fn wglGetProcAddress(name: *const libc::c_char) -> u64 {
+pub unsafe extern "win64" fn wglGetProcAddress(name: *const libc::c_char) -> u64 {
     if !name.is_null() {
         let name_str = std::ffi::CStr::from_ptr(name).to_string_lossy();
         let ptr = glXGetProcAddress(name);
@@ -139,7 +201,7 @@ pub unsafe extern "system" fn wglGetProcAddress(name: *const libc::c_char) -> u6
     0x00050000 // Non-null GL procedure pointer
 }
 
-pub unsafe extern "system" fn wglDeleteContext(hglrc: u64) -> i32 {
+pub unsafe extern "win64" fn wglDeleteContext(hglrc: u64) -> i32 {
     println!(
         "[OPENGL WGL] wglDeleteContext(HGLRC 0x{:X}) -> Success",
         hglrc

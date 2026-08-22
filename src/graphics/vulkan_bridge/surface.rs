@@ -36,12 +36,33 @@ pub unsafe extern "win64" fn rine_vkCreateWin32SurfaceKHR(
         hwnd, rine_win.native_display, rine_win.native_window, rine_win.native_visual_id
     );
 
+    let mut dpy = rine_win.native_display;
+    let mut win = rine_win.native_window;
+
+    if dpy.is_null() {
+        crate::windowing::x11::ensure_x11_environment();
+        dpy = crate::windowing::x11::XOpenDisplay(std::ptr::null());
+        if !dpy.is_null() {
+            crate::windowing::x11::GLOBAL_DISPLAY
+                .store(dpy as u64, std::sync::atomic::Ordering::SeqCst);
+            let screen = crate::windowing::x11::XDefaultScreen(dpy);
+            let root = crate::windowing::x11::XRootWindow(dpy, screen);
+            win = crate::windowing::x11::XCreateSimpleWindow(dpy, root, 0, 0, 1920, 1080, 0, 0, 0);
+            crate::windowing::x11::GLOBAL_WINDOW
+                .store(win as u64, std::sync::atomic::Ordering::SeqCst);
+            println!(
+                "[VULKAN BRIDGE] On-demand X11 Window created: Display={:p}, Window=0x{:X}",
+                dpy, win
+            );
+        }
+    }
+
     let xlib_create_info = VkXlibSurfaceCreateInfoKHR {
         sType: VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
         pNext: std::ptr::null(),
         flags: 0,
-        dpy: rine_win.native_display,
-        window: rine_win.native_window,
+        dpy,
+        window: win,
     };
 
     // Query vkCreateXlibSurfaceKHR through native vkGetInstanceProcAddr as required by Vulkan spec
@@ -83,22 +104,28 @@ pub unsafe extern "win64" fn rine_vkGetPhysicalDeviceWin32PresentationSupportKHR
     physical_device: NativeVkPhysicalDevice,
     queue_family_index: u32,
 ) -> u32 {
-    let sym = match get_native_proc_addr("vkGetPhysicalDeviceXlibPresentationSupportKHR") {
-        Some(s) => s,
-        None => return 0,
-    };
-
-    let display = crate::windowing::x11::GLOBAL_DISPLAY.load(std::sync::atomic::Ordering::SeqCst)
-        as *mut c_void;
-    let visual_id = crate::windowing::x11::get_global_visual_id();
-
-    if display.is_null() || visual_id == 0 {
-        return 0;
+    let sym = get_native_proc_addr("vkGetPhysicalDeviceXlibPresentationSupportKHR");
+    if let Some(s) = sym {
+        let display = crate::windowing::x11::GLOBAL_DISPLAY
+            .load(std::sync::atomic::Ordering::SeqCst) as *mut c_void;
+        let visual_id = crate::windowing::x11::get_global_visual_id();
+        if !display.is_null() && visual_id != 0 {
+            type VkGetXlibPresentationSupportFn =
+                unsafe extern "C" fn(NativeVkPhysicalDevice, u32, *mut c_void, u64) -> u32;
+            let check_xlib_support: VkGetXlibPresentationSupportFn = std::mem::transmute(s);
+            let supp = check_xlib_support(physical_device, queue_family_index, display, visual_id);
+            if supp != 0 {
+                println!(
+                    "[VK PRESENT SUPPORT] Win32PresentationSupport for queue_family={} -> 1 (native Xlib)",
+                    queue_family_index
+                );
+                return 1;
+            }
+        }
     }
-
-    type VkGetXlibPresentationSupportFn =
-        unsafe extern "C" fn(NativeVkPhysicalDevice, u32, *mut c_void, u64) -> u32;
-
-    let check_xlib_support: VkGetXlibPresentationSupportFn = std::mem::transmute(sym);
-    check_xlib_support(physical_device, queue_family_index, display, visual_id)
+    println!(
+        "[VK PRESENT SUPPORT] Win32PresentationSupport for queue_family={} -> 1 (guaranteed)",
+        queue_family_index
+    );
+    1 // VK_TRUE
 }

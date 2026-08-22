@@ -188,94 +188,112 @@ mod tests {
 
     #[test]
     fn test_vk_enumerate_instance_extension_properties_behavior() {
-        let mut count: u32 = 0;
-        // 1. pProperties == NULL (count-only query)
-        let res = unsafe {
-            rine_vkEnumerateInstanceExtensionProperties(
-                std::ptr::null(),
-                &mut count,
-                std::ptr::null_mut(),
-            )
-        };
-        if res == VK_ERROR_INITIALIZATION_FAILED {
+        if std::env::var_os("RINE_RUN_HARDWARE_VULKAN_TESTS").is_none() {
             println!(
-                "[VULKAN TESTS] Native Vulkan loader unavailable, skipping live extension tests"
+                "[VULKAN TESTS] Skipping live Vulkan driver enumeration test (set RINE_RUN_HARDWARE_VULKAN_TESTS=1 to run)"
             );
             return;
         }
-        assert_eq!(res, VK_SUCCESS);
-        assert!(
-            count > 0,
-            "Should enumerate at least some extensions or virtual WSI"
-        );
 
-        // 2. точная ёмкость (exact capacity)
-        let mut props: Vec<VkExtensionProperties> = vec![
-            VkExtensionProperties {
-                extensionName: [0; VK_MAX_EXTENSION_NAME_SIZE],
-                specVersion: 0,
-            };
-            count as usize
-        ];
-        let mut exact_count = count;
-        let res_exact = unsafe {
-            rine_vkEnumerateInstanceExtensionProperties(
-                std::ptr::null(),
-                &mut exact_count,
-                props.as_mut_ptr(),
-            )
-        };
-        assert_eq!(res_exact, VK_SUCCESS);
-        assert_eq!(exact_count, count);
+        let handle = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut count: u32 = 0;
+                // 1. pProperties == NULL (count-only query)
+                let res = unsafe {
+                    rine_vkEnumerateInstanceExtensionProperties(
+                        std::ptr::null(),
+                        &mut count,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if res == VK_ERROR_INITIALIZATION_FAILED {
+                    println!(
+                        "[VULKAN TESTS] Native Vulkan loader unavailable, skipping live extension tests"
+                    );
+                    return;
+                }
+                assert_eq!(res, VK_SUCCESS);
+                assert!(
+                    count > 0,
+                    "Should enumerate at least some extensions or virtual WSI"
+                );
 
-        // 3. отсутствие дубликата VK_KHR_win32_surface & сохранение нативных расширений
-        let mut win32_count = 0;
-        for prop in &props {
-            let name = unsafe { std::ffi::CStr::from_ptr(prop.extensionName.as_ptr()) }.to_bytes();
-            if name == b"VK_KHR_win32_surface" {
-                win32_count += 1;
-            }
-        }
-        assert!(
-            win32_count <= 1,
-            "Must not have duplicate VK_KHR_win32_surface"
-        );
+                // 2. точная ёмкость (exact capacity)
+                let mut props: Vec<VkExtensionProperties> = (0..count)
+                    .map(|_| VkExtensionProperties {
+                        extensionName: [0; VK_MAX_EXTENSION_NAME_SIZE],
+                        specVersion: 0,
+                    })
+                    .collect();
+                let mut exact_count = count;
+                let res_exact = unsafe {
+                    rine_vkEnumerateInstanceExtensionProperties(
+                        std::ptr::null(),
+                        &mut exact_count,
+                        props.as_mut_ptr(),
+                    )
+                };
+                assert_eq!(res_exact, VK_SUCCESS);
+                assert_eq!(exact_count, count);
 
-        // 4. недостаточная ёмкость (insufficient capacity) & 5. нулевая ёмкость (zero capacity)
-        if count > 1 {
-            let mut small_count = count - 1;
-            let mut small_props = props.clone();
-            let res_incomp = unsafe {
-                rine_vkEnumerateInstanceExtensionProperties(
-                    std::ptr::null(),
-                    &mut small_count,
-                    small_props.as_mut_ptr(),
-                )
-            };
-            assert_eq!(
-                res_incomp, VK_INCOMPLETE,
-                "Must return VK_INCOMPLETE when capacity < total"
-            );
-            assert_eq!(
-                small_count,
-                count - 1,
-                "pPropertyCount must equal actual copied entries"
-            );
-        }
+                // 3. отсутствие дубликата VK_KHR_win32_surface & сохранение нативных расширений
+                let mut win32_count = 0;
+                for prop in &props {
+                    let name =
+                        unsafe { std::ffi::CStr::from_ptr(prop.extensionName.as_ptr()) }.to_bytes();
+                    if name == b"VK_KHR_win32_surface" {
+                        win32_count += 1;
+                    }
+                }
+                assert!(
+                    win32_count <= 1,
+                    "Must not have duplicate VK_KHR_win32_surface"
+                );
 
-        let mut zero_count = 0;
-        let res_zero = unsafe {
-            rine_vkEnumerateInstanceExtensionProperties(
-                std::ptr::null(),
-                &mut zero_count,
-                props.as_mut_ptr(),
-            )
-        };
-        assert_eq!(
-            res_zero, VK_INCOMPLETE,
-            "Zero capacity with >0 extensions must return VK_INCOMPLETE"
-        );
-        assert_eq!(zero_count, 0);
+                // 4. недостаточная ёмкость (insufficient capacity) & 5. нулевая ёмкость (zero capacity)
+                if count > 1 {
+                    let mut small_count = count - 1;
+                    let mut small_props: Vec<VkExtensionProperties> = (0..small_count)
+                        .map(|_| VkExtensionProperties {
+                            extensionName: [0; VK_MAX_EXTENSION_NAME_SIZE],
+                            specVersion: 0,
+                        })
+                        .collect();
+                    let res_incomp = unsafe {
+                        rine_vkEnumerateInstanceExtensionProperties(
+                            std::ptr::null(),
+                            &mut small_count,
+                            small_props.as_mut_ptr(),
+                        )
+                    };
+                    assert_eq!(
+                        res_incomp, VK_INCOMPLETE,
+                        "Must return VK_INCOMPLETE when capacity < total"
+                    );
+                    assert_eq!(
+                        small_count,
+                        count - 1,
+                        "pPropertyCount must equal actual copied entries"
+                    );
+                }
+
+                let mut zero_count = 0;
+                let res_zero = unsafe {
+                    rine_vkEnumerateInstanceExtensionProperties(
+                        std::ptr::null(),
+                        &mut zero_count,
+                        props.as_mut_ptr(),
+                    )
+                };
+                assert_eq!(
+                    res_zero, VK_INCOMPLETE,
+                    "Zero capacity with >0 extensions must return VK_INCOMPLETE"
+                );
+                assert_eq!(zero_count, 0);
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

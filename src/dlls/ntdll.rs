@@ -271,6 +271,53 @@ pub fn RtlCaptureContext(_context_record: u64) -> () {
     println!("[NTDLL] RtlCaptureContext captured context record");
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct OsVersionInfoExW {
+    pub dw_os_version_info_size: u32,
+    pub dw_major_version: u32,
+    pub dw_minor_version: u32,
+    pub dw_build_number: u32,
+    pub dw_platform_id: u32,
+    pub sz_csd_version: [u16; 128],
+    pub w_service_pack_major: u16,
+    pub w_service_pack_minor: u16,
+    pub w_suite_mask: u16,
+    pub w_product_type: u8,
+    pub w_reserved: u8,
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn RtlGetVersion(lp_version_information: *mut OsVersionInfoExW) -> i32 {
+    if lp_version_information.is_null() {
+        return -1073741811; // STATUS_INVALID_PARAMETER (0xC000000D)
+    }
+
+    let size = (*lp_version_information).dw_os_version_info_size;
+    if size < 276 {
+        return -1073741811;
+    }
+
+    (*lp_version_information).dw_major_version = 10;
+    (*lp_version_information).dw_minor_version = 0;
+    (*lp_version_information).dw_build_number = 19045;
+    (*lp_version_information).dw_platform_id = 2; // VER_PLATFORM_WIN32_NT
+    for i in 0..128 {
+        (*lp_version_information).sz_csd_version[i] = 0;
+    }
+
+    if size >= 284 {
+        (*lp_version_information).w_service_pack_major = 0;
+        (*lp_version_information).w_service_pack_minor = 0;
+        (*lp_version_information).w_suite_mask = 0x0100; // VER_SUITE_SINGLEUSERTS
+        (*lp_version_information).w_product_type = 1; // VER_NT_WORKSTATION
+        (*lp_version_information).w_reserved = 0;
+    }
+
+    println!("[NTDLL] RtlGetVersion -> Win 10.0.19045 (size={})", size);
+    0 // STATUS_SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +348,45 @@ mod tests {
         let region = NtAllocateVirtualMemory(&mut addr, 4096, WinPageProtection::READWRITE);
         assert!(region.is_ok());
         assert!(addr > 0);
+    }
+
+    #[test]
+    fn test_rtl_get_version_contract() {
+        // 1. Success with OSVERSIONINFOW (276 bytes)
+        let mut info_w: OsVersionInfoExW = unsafe { std::mem::zeroed() };
+        info_w.dw_os_version_info_size = 276;
+        let status = unsafe { RtlGetVersion(&mut info_w) };
+        assert_eq!(status, 0);
+        assert_eq!(info_w.dw_major_version, 10);
+        assert_eq!(info_w.dw_minor_version, 0);
+        assert_eq!(info_w.dw_build_number, 19045);
+        assert_eq!(info_w.dw_platform_id, 2);
+
+        // 2. Success with OSVERSIONINFOEXW (284 bytes)
+        let mut info_ex: OsVersionInfoExW = unsafe { std::mem::zeroed() };
+        info_ex.dw_os_version_info_size = 284;
+        let status_ex = unsafe { RtlGetVersion(&mut info_ex) };
+        assert_eq!(status_ex, 0);
+        assert_eq!(info_ex.w_product_type, 1);
+        assert_eq!(info_ex.w_suite_mask, 0x0100);
+
+        // 3. Null pointer error
+        let err_null = unsafe { RtlGetVersion(std::ptr::null_mut()) };
+        assert_eq!(err_null, -1073741811);
+
+        // 4. Too small size
+        let mut info_bad: OsVersionInfoExW = unsafe { std::mem::zeroed() };
+        info_bad.dw_os_version_info_size = 100;
+        let err_bad = unsafe { RtlGetVersion(&mut info_bad) };
+        assert_eq!(err_bad, -1073741811);
+    }
+
+    #[test]
+    fn test_rtl_get_version_win64_call() {
+        let func_ptr: unsafe extern "win64" fn(*mut OsVersionInfoExW) -> i32 = RtlGetVersion;
+        let mut info: OsVersionInfoExW = unsafe { std::mem::zeroed() };
+        info.dw_os_version_info_size = 284;
+        let status = unsafe { func_ptr(&mut info) };
+        assert_eq!(status, 0);
     }
 }

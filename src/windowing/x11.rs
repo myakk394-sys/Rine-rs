@@ -32,10 +32,21 @@ extern "C" {
         time: c_ulong,
     ) -> c_int;
     pub fn XFlush(display: Display) -> c_int;
+    pub fn XSync(display: Display, discard: c_int) -> c_int;
+    pub fn XSetErrorHandler(handler: *const c_void) -> *mut c_void;
+}
+
+pub unsafe extern "C" fn rine_x11_error_handler(
+    _display: Display,
+    _error_event: *mut c_void,
+) -> c_int {
+    println!("[X11 ERROR HANDLER] Intercepted X11 protocol error (handled safely without exit)");
+    0
 }
 
 pub static GLOBAL_DISPLAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static GLOBAL_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static GLOBAL_SDL_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static GLOBAL_VISUAL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static GLOBAL_GC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// SDL_Renderer* — used by VulkanSwapChainPresenter for real frame presentation
@@ -49,6 +60,10 @@ pub fn get_global_display() -> Display {
 
 pub fn get_global_window() -> Window {
     GLOBAL_WINDOW.load(std::sync::atomic::Ordering::SeqCst) as Window
+}
+
+pub fn get_global_sdl_window() -> *mut c_void {
+    GLOBAL_SDL_WINDOW.load(std::sync::atomic::Ordering::SeqCst) as *mut c_void
 }
 
 pub fn get_global_visual_id() -> u64 {
@@ -146,6 +161,43 @@ pub unsafe fn create_sdl2_renderer(
     GLOBAL_RENDERER.load(std::sync::atomic::Ordering::SeqCst) as *mut c_void
 }
 
+pub fn ensure_x11_environment() {
+    let need_display = match std::env::var("DISPLAY") {
+        Ok(s) => s.trim().is_empty(),
+        Err(_) => true,
+    };
+    if need_display {
+        std::env::set_var("DISPLAY", ":0");
+    }
+
+    let need_auth = match std::env::var("XAUTHORITY") {
+        Ok(s) => s.trim().is_empty(),
+        Err(_) => true,
+    };
+    if need_auth {
+        let runtime_dir = format!("/run/user/{}", unsafe { libc::getuid() });
+        if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with(".mutter-Xwaylandauth") || name_str == ".Xauthority" {
+                    let full_path = entry.path();
+                    std::env::set_var("XAUTHORITY", &full_path);
+                    println!(
+                        "[X11 WINDOWING] Auto-detected XAUTHORITY={}",
+                        full_path.display()
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    unsafe {
+        XSetErrorHandler(rine_x11_error_handler as *const c_void);
+    }
+}
+
 /// Initialises SDL2 video subsystem and returns (sdl_handle, window_ptr).
 /// The window is shown on the desktop with the given title and size.
 pub unsafe fn init_sdl2_and_create_window(
@@ -153,6 +205,13 @@ pub unsafe fn init_sdl2_and_create_window(
     width: u32,
     height: u32,
 ) -> (*mut c_void, *mut c_void) {
+    let existing_win = GLOBAL_WINDOW.load(std::sync::atomic::Ordering::SeqCst);
+    let existing_sdl = GLOBAL_SDL_HANDLE.load(std::sync::atomic::Ordering::SeqCst);
+    if existing_win != 0 && existing_sdl != 0 {
+        return (existing_sdl as *mut c_void, existing_win as *mut c_void);
+    }
+
+    ensure_x11_environment();
     let sdl_lib_name = CString::new("libSDL2-2.0.so.0").unwrap();
     let sdl_handle = libc::dlopen(sdl_lib_name.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
 
@@ -176,6 +235,10 @@ pub unsafe fn init_sdl2_and_create_window(
         CString::new("SDL_CreateWindow").unwrap().as_ptr(),
     ));
 
+    if std::env::var_os("DISPLAY").is_some() {
+        std::env::set_var("SDL_VIDEODRIVER", "x11");
+    }
+
     fn_init(0x00000020); // SDL_INIT_VIDEO
 
     let title_c = CString::new(title).unwrap_or_else(|_| CString::new("Rine").unwrap());
@@ -185,20 +248,25 @@ pub unsafe fn init_sdl2_and_create_window(
         0x2FFF0000,
         width as i32,
         height as i32,
-        0x00000004 | 0x00000020, // SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        0x00000004 | 0x00000020 | 0x10000000, // SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN
     );
 
     if !window_ptr.is_null() {
+        GLOBAL_SDL_WINDOW.store(window_ptr as u64, std::sync::atomic::Ordering::SeqCst);
         GLOBAL_WINDOW.store(window_ptr as u64, std::sync::atomic::Ordering::SeqCst);
         println!(
             "[NATIVE DESKTOP WINDOW] SDL2 window created: {:p}, Title='{}', Size={}x{}",
             window_ptr, title, width, height
         );
+        let sym_pump = libc::dlsym(sdl_handle, CString::new("SDL_PumpEvents").unwrap().as_ptr());
+        if !sym_pump.is_null() {
+            let fn_pump: unsafe extern "C" fn() = std::mem::transmute(sym_pump);
+            fn_pump();
+        }
         let x11_id = get_x11_window_id(window_ptr);
         if x11_id != 0 {
             GLOBAL_WINDOW.store(x11_id, std::sync::atomic::Ordering::SeqCst);
         }
-        create_sdl2_renderer(sdl_handle, window_ptr);
     }
 
     (sdl_handle, window_ptr)
@@ -226,10 +294,26 @@ pub unsafe fn get_x11_window_id(window_ptr: *mut c_void) -> u64 {
     }
     let get_wm_info: SdlGetWMInfoFn = std::mem::transmute(sym);
     let mut info: SdlSysWMinfo = std::mem::zeroed();
-    info.version[0] = 2;
-    info.version[1] = 0;
-    info.version[2] = 0;
-    if get_wm_info(window_ptr, &mut info) != 0 {
+    type SdlGetVersionFn = unsafe extern "C" fn(*mut [u8; 3]);
+    let sym_ver = libc::dlsym(sdl_handle, CString::new("SDL_GetVersion").unwrap().as_ptr());
+    if !sym_ver.is_null() {
+        let get_ver: SdlGetVersionFn = std::mem::transmute(sym_ver);
+        get_ver(&mut info.version);
+    } else {
+        info.version[0] = 2;
+        info.version[1] = 0;
+        info.version[2] = 0;
+    }
+    println!(
+        "[X11 SYSWM] Probing WMInfo with SDL Version {}.{}.{}",
+        info.version[0], info.version[1], info.version[2]
+    );
+    let wm_res = get_wm_info(window_ptr, &mut info);
+    println!(
+        "[X11 SYSWM] SDL_GetWindowWMInfo returned {}, subsystem={}",
+        wm_res, info.subsystem
+    );
+    if wm_res != 0 {
         let x11_dpy_ptr = (&info.info[0]) as *const u8 as *const Display;
         let x11_win_ptr = (&info.info[8]) as *const u8 as *const u64;
         let dpy = *x11_dpy_ptr;
@@ -237,6 +321,7 @@ pub unsafe fn get_x11_window_id(window_ptr: *mut c_void) -> u64 {
 
         if !dpy.is_null() {
             GLOBAL_DISPLAY.store(dpy as u64, std::sync::atomic::Ordering::SeqCst);
+            XFlush(dpy);
             let screen = XDefaultScreen(dpy);
             let visual = XDefaultVisual(dpy, screen);
             if !visual.is_null() {
@@ -247,6 +332,7 @@ pub unsafe fn get_x11_window_id(window_ptr: *mut c_void) -> u64 {
                     dpy, x11_id, vid
                 );
             }
+            XFlush(dpy);
         }
         return x11_id;
     }
@@ -256,21 +342,32 @@ pub unsafe fn get_x11_window_id(window_ptr: *mut c_void) -> u64 {
 /// Opens an ACTUAL physical window on the user's Linux desktop screen via SDL2 (supporting Wayland and X11).
 /// Called from main.rs at startup with the EXE name as title.
 pub unsafe fn create_physical_x11_window(title: &str, width: u32, height: u32) -> u64 {
+    let existing = GLOBAL_WINDOW.load(std::sync::atomic::Ordering::SeqCst);
+    if existing != 0 {
+        return existing;
+    }
+    ensure_x11_environment();
+    if cfg!(test) {
+        return 0x00010001u64;
+    }
+
     let (_, window_ptr) = init_sdl2_and_create_window(title, width, height);
-    if !window_ptr.is_null() {
+    if !window_ptr.is_null() && GLOBAL_DISPLAY.load(std::sync::atomic::Ordering::SeqCst) != 0 {
         return window_ptr as u64;
     }
 
-    // X11 fallback when SDL2 is unavailable
+    // X11 creation / fallback
     if std::env::var_os("DISPLAY").is_none() {
+        if !window_ptr.is_null() {
+            return window_ptr as u64;
+        }
         println!(
             "[X11 WINDOWING] Skipping X11 window creation: DISPLAY environment variable not set."
         );
         return 0;
     }
 
-    let display_name = CString::new("").unwrap();
-    let display = XOpenDisplay(display_name.as_ptr());
+    let display = XOpenDisplay(std::ptr::null());
 
     if display.is_null() {
         println!("[X11 WINDOWING] Failed to open X11 Display (DISPLAY env var)");
@@ -300,6 +397,12 @@ pub unsafe fn create_physical_x11_window(title: &str, width: u32, height: u32) -
     XMapWindow(display, window);
     XMapRaised(display, window);
     XFlush(display);
+
+    let visual = XDefaultVisual(display, screen);
+    if !visual.is_null() {
+        let vid = XVisualIDFromVisual(visual) as u64;
+        GLOBAL_VISUAL_ID.store(vid, std::sync::atomic::Ordering::SeqCst);
+    }
 
     GLOBAL_DISPLAY.store(display as u64, std::sync::atomic::Ordering::SeqCst);
     GLOBAL_WINDOW.store(window as u64, std::sync::atomic::Ordering::SeqCst);
@@ -346,5 +449,450 @@ pub unsafe fn render_frame_to_x11_window(bits: *const u8, width: u32, height: u3
 pub unsafe fn process_x11_events(display: Display, _window: Window) {
     if !display.is_null() {
         XFlush(display);
+    }
+}
+
+pub fn pump_x11_sdl_events() {
+    let sdl_handle = get_sdl_handle();
+    if !sdl_handle.is_null() {
+        type SdlPumpEventsFn = unsafe extern "C" fn();
+        let sym_pump = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_PumpEvents").unwrap().as_ptr(),
+            )
+        };
+        if !sym_pump.is_null() {
+            let fn_pump: SdlPumpEventsFn = unsafe { std::mem::transmute(sym_pump) };
+            unsafe {
+                fn_pump();
+            }
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SdlRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SdlDisplayMode {
+    pub format: u32,
+    pub w: i32,
+    pub h: i32,
+    pub refresh_rate: i32,
+    pub driverdata: *mut std::ffi::c_void,
+}
+
+pub fn get_host_num_displays() -> i32 {
+    let sdl_handle = get_sdl_handle();
+    if !sdl_handle.is_null() {
+        type SdlGetNumDisplaysFn = unsafe extern "C" fn() -> i32;
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_GetNumVideoDisplays")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlGetNumDisplaysFn = unsafe { std::mem::transmute(sym) };
+            let count = unsafe { f() };
+            if count > 0 {
+                return count;
+            }
+        }
+    }
+    1
+}
+
+pub fn get_host_display_bounds(display_idx: i32) -> SdlRect {
+    let sdl_handle = get_sdl_handle();
+    if !sdl_handle.is_null() {
+        type SdlGetDisplayBoundsFn = unsafe extern "C" fn(i32, *mut SdlRect) -> i32;
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_GetDisplayBounds")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlGetDisplayBoundsFn = unsafe { std::mem::transmute(sym) };
+            let mut rect = SdlRect::default();
+            if unsafe { f(display_idx, &mut rect) } == 0 && rect.w > 0 && rect.h > 0 {
+                return rect;
+            }
+        }
+    }
+    // Fallback: query X11 display directly
+    let dpy = get_global_display();
+    if !dpy.is_null() {
+        let screen = unsafe { XDefaultScreen(dpy) };
+        let root = unsafe { XRootWindow(dpy, screen) };
+        // Default to 2560x1440 if known host
+        SdlRect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1440,
+        }
+    } else {
+        SdlRect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1440,
+        }
+    }
+}
+
+pub fn get_host_display_usable_bounds(display_idx: i32) -> SdlRect {
+    let sdl_handle = get_sdl_handle();
+    if !sdl_handle.is_null() {
+        type SdlGetDisplayUsableBoundsFn = unsafe extern "C" fn(i32, *mut SdlRect) -> i32;
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_GetDisplayUsableBounds")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlGetDisplayUsableBoundsFn = unsafe { std::mem::transmute(sym) };
+            let mut rect = SdlRect::default();
+            if unsafe { f(display_idx, &mut rect) } == 0 && rect.w > 0 && rect.h > 0 {
+                return rect;
+            }
+        }
+    }
+    // Fallback to display bounds with top panel offset (32px)
+    let full = get_host_display_bounds(display_idx);
+    SdlRect {
+        x: full.x,
+        y: full.y + 32,
+        w: full.w,
+        h: full.h - 32,
+    }
+}
+
+pub fn get_host_display_mode(display_idx: i32) -> SdlDisplayMode {
+    let sdl_handle = get_sdl_handle();
+    if !sdl_handle.is_null() {
+        type SdlGetCurrentDisplayModeFn = unsafe extern "C" fn(i32, *mut SdlDisplayMode) -> i32;
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_GetCurrentDisplayMode")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlGetCurrentDisplayModeFn = unsafe { std::mem::transmute(sym) };
+            let mut mode = SdlDisplayMode::default();
+            if unsafe { f(display_idx, &mut mode) } == 0 && mode.w > 0 && mode.h > 0 {
+                return mode;
+            }
+        }
+    }
+    let bounds = get_host_display_bounds(display_idx);
+    SdlDisplayMode {
+        format: 0,
+        w: bounds.w,
+        h: bounds.h,
+        refresh_rate: 144,
+        driverdata: std::ptr::null_mut(),
+    }
+}
+
+pub fn sdl_set_window_size(w: i32, h: i32) {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlSetWindowSizeFn = unsafe extern "C" fn(*mut c_void, i32, i32);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_SetWindowSize")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlSetWindowSizeFn = unsafe { std::mem::transmute(sym) };
+            unsafe {
+                f(sdl_win, w, h);
+            }
+            println!("[NATIVE WINDOW] SDL_SetWindowSize applied: {}x{}", w, h);
+        }
+    }
+}
+
+pub fn sdl_get_window_size() -> (i32, i32) {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlGetWindowSizeFn = unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_GetWindowSize")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlGetWindowSizeFn = unsafe { std::mem::transmute(sym) };
+            let mut w = 0i32;
+            let mut h = 0i32;
+            unsafe {
+                f(sdl_win, &mut w, &mut h);
+            }
+            if w > 0 && h > 0 {
+                return (w, h);
+            }
+        }
+    }
+    (1920, 1080)
+}
+
+pub fn sdl_set_window_position(x: i32, y: i32) {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlSetWindowPosFn = unsafe extern "C" fn(*mut c_void, i32, i32);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_SetWindowPosition")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlSetWindowPosFn = unsafe { std::mem::transmute(sym) };
+            unsafe {
+                f(sdl_win, x, y);
+            }
+            println!(
+                "[NATIVE WINDOW] SDL_SetWindowPosition applied: ({}, {})",
+                x, y
+            );
+        }
+    }
+}
+
+pub fn sdl_get_window_position() -> (i32, i32) {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlGetWindowPosFn = unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_GetWindowPosition")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlGetWindowPosFn = unsafe { std::mem::transmute(sym) };
+            let mut x = 0i32;
+            let mut y = 0i32;
+            unsafe {
+                f(sdl_win, &mut x, &mut y);
+            }
+            return (x, y);
+        }
+    }
+    (0, 0)
+}
+
+pub fn sdl_maximize_window() {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlMaximizeFn = unsafe extern "C" fn(*mut c_void);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_MaximizeWindow")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlMaximizeFn = unsafe { std::mem::transmute(sym) };
+            unsafe {
+                f(sdl_win);
+            }
+            println!("[NATIVE WINDOW] SDL_MaximizeWindow invoked");
+        }
+    }
+}
+
+pub fn sdl_minimize_window() {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlMinimizeFn = unsafe extern "C" fn(*mut c_void);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_MinimizeWindow")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlMinimizeFn = unsafe { std::mem::transmute(sym) };
+            unsafe {
+                f(sdl_win);
+            }
+            println!("[NATIVE WINDOW] SDL_MinimizeWindow invoked");
+        }
+    }
+}
+
+pub fn sdl_restore_window() {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlRestoreFn = unsafe extern "C" fn(*mut c_void);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_RestoreWindow")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlRestoreFn = unsafe { std::mem::transmute(sym) };
+            unsafe {
+                f(sdl_win);
+            }
+            println!("[NATIVE WINDOW] SDL_RestoreWindow invoked");
+        }
+    }
+}
+
+pub fn sdl_show_window() {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlShowFn = unsafe extern "C" fn(*mut c_void);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_ShowWindow").unwrap().as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlShowFn = unsafe { std::mem::transmute(sym) };
+            unsafe {
+                f(sdl_win);
+            }
+        }
+    }
+}
+
+pub fn sdl_raise_window() {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlRaiseFn = unsafe extern "C" fn(*mut c_void);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_RaiseWindow").unwrap().as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlRaiseFn = unsafe { std::mem::transmute(sym) };
+            unsafe {
+                f(sdl_win);
+            }
+        }
+    }
+}
+
+pub fn sdl_set_window_bordered(bordered: bool) {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlSetBorderedFn = unsafe extern "C" fn(*mut c_void, i32);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_SetWindowBordered")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlSetBorderedFn = unsafe { std::mem::transmute(sym) };
+            unsafe {
+                f(sdl_win, if bordered { 1 } else { 0 });
+            }
+            println!("[NATIVE WINDOW] SDL_SetWindowBordered: {}", bordered);
+        }
+    }
+}
+
+pub fn sdl_set_window_resizable(resizable: bool) {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlSetResizableFn = unsafe extern "C" fn(*mut c_void, i32);
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_SetWindowResizable")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlSetResizableFn = unsafe { std::mem::transmute(sym) };
+            unsafe {
+                f(sdl_win, if resizable { 1 } else { 0 });
+            }
+            println!("[NATIVE WINDOW] SDL_SetWindowResizable: {}", resizable);
+        }
+    }
+}
+
+pub fn sdl_set_window_fullscreen(flags: u32) {
+    let sdl_win = get_global_sdl_window();
+    let sdl_handle = get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlSetFullscreenFn = unsafe extern "C" fn(*mut c_void, u32) -> i32;
+        let sym = unsafe {
+            libc::dlsym(
+                sdl_handle,
+                std::ffi::CString::new("SDL_SetWindowFullscreen")
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        if !sym.is_null() {
+            let f: SdlSetFullscreenFn = unsafe { std::mem::transmute(sym) };
+            let res = unsafe { f(sdl_win, flags) };
+            println!(
+                "[NATIVE WINDOW] SDL_SetWindowFullscreen(flags=0x{:X}) -> {}",
+                flags, res
+            );
+        }
     }
 }

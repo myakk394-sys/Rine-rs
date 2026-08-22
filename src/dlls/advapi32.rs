@@ -84,6 +84,119 @@ pub fn RegCloseKey(hkey: HKEY) -> NtStatus {
     STATUS_SUCCESS
 }
 
+pub unsafe extern "win64" fn BCryptGenRandom(
+    h_algorithm: usize,
+    pb_buffer: *mut u8,
+    cb_buffer: u32,
+    dw_flags: u32,
+) -> i32 {
+    println!(
+        "[BCRYPT ENTRY] BCryptGenRandom hAlgorithm=0x{:X}, pb_buffer={:p}, cb_buffer={}, dwFlags=0x{:X}",
+        h_algorithm, pb_buffer, cb_buffer, dw_flags
+    );
+
+    // BCRYPT_USE_SYSTEM_PREFERRED_RNG = 0x00000002
+    if (dw_flags & 0x00000002) != 0 {
+        if h_algorithm != 0 {
+            // Must be NULL when BCRYPT_USE_SYSTEM_PREFERRED_RNG is specified
+            return -1073741816; // STATUS_INVALID_HANDLE (0xC0000008)
+        }
+    } else if h_algorithm == 0 {
+        return -1073741816; // STATUS_INVALID_HANDLE (0xC0000008)
+    }
+
+    if !pb_buffer.is_null() && cb_buffer > 0 {
+        let slice = std::slice::from_raw_parts_mut(pb_buffer, cb_buffer as usize);
+        // Fill buffer with real OS cryptographic randomness from /dev/urandom
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            let _ = f.read_exact(slice);
+        } else {
+            // Fallback to getentropy/system time entropy if /dev/urandom fails
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0x123456789ABCDEF0);
+            for (i, byte) in slice.iter_mut().enumerate() {
+                *byte = ((seed.wrapping_add(i as u128)) & 0xFF) as u8;
+            }
+        }
+    }
+
+    0 // STATUS_SUCCESS
+}
+
+pub unsafe extern "win64" fn AdjustTokenPrivileges(
+    _token_handle: usize,
+    _disable_all: u32,
+    _new_state: usize,
+    _buffer_length: u32,
+    _previous_state: usize,
+    return_length: *mut u32,
+) -> u32 {
+    println!("[ADVAPI32 ENTRY] AdjustTokenPrivileges");
+    if !return_length.is_null() {
+        *return_length = 0;
+    }
+    1 // TRUE
+}
+
+pub unsafe extern "win64" fn GetTokenInformation(
+    _token_handle: usize,
+    _class: u32,
+    token_info: *mut u8,
+    info_len: u32,
+    return_length: *mut u32,
+) -> u32 {
+    println!(
+        "[ADVAPI32 ENTRY] GetTokenInformation class={}, len={}",
+        _class, info_len
+    );
+    if !return_length.is_null() {
+        *return_length = info_len;
+    }
+    if !token_info.is_null() && info_len >= 4 {
+        std::ptr::write_bytes(token_info, 0, info_len as usize);
+    }
+    1 // TRUE
+}
+
+pub unsafe extern "win64" fn OpenProcessToken(
+    _process_handle: usize,
+    _desired_access: u32,
+    token_handle: *mut usize,
+) -> u32 {
+    println!("[ADVAPI32 ENTRY] OpenProcessToken");
+    if !token_handle.is_null() {
+        *token_handle = 0x1000;
+    }
+    1 // TRUE
+}
+
+pub unsafe extern "win64" fn GetSidSubAuthority(_sid: usize, _sub_authority: u32) -> *mut u32 {
+    static mut SUB_AUTH: u32 = 1000;
+    println!("[ADVAPI32 ENTRY] GetSidSubAuthority");
+    unsafe { &raw mut SUB_AUTH }
+}
+
+pub unsafe extern "win64" fn GetSidSubAuthorityCount(_sid: usize) -> *mut u8 {
+    static mut COUNT: u8 = 1;
+    println!("[ADVAPI32 ENTRY] GetSidSubAuthorityCount");
+    unsafe { &raw mut COUNT }
+}
+
+pub unsafe extern "win64" fn LookupPrivilegeValueW(
+    _system_name: usize,
+    _name: usize,
+    luid: *mut u64,
+) -> u32 {
+    println!("[ADVAPI32 ENTRY] LookupPrivilegeValueW");
+    if !luid.is_null() {
+        *luid = 0x1234;
+    }
+    1 // TRUE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -45,6 +45,56 @@ pub fn get_dummy_data_buffer_ptr() -> usize {
     })
 }
 
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "win64" fn universal_stub_thunk() {
+    std::arch::naked_asm!(
+        "push rbx",
+        "push rbp",
+        "push rsi",
+        "push rdi",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        "sub rsp, 0xA0",
+        "movdqu [rsp + 0x00], xmm6",
+        "movdqu [rsp + 0x10], xmm7",
+        "movdqu [rsp + 0x20], xmm8",
+        "movdqu [rsp + 0x30], xmm9",
+        "movdqu [rsp + 0x40], xmm10",
+        "movdqu [rsp + 0x50], xmm11",
+        "movdqu [rsp + 0x60], xmm12",
+        "movdqu [rsp + 0x70], xmm13",
+        "movdqu [rsp + 0x80], xmm14",
+        "movdqu [rsp + 0x90], xmm15",
+        "sub rsp, 0x28",
+        "call {inner_stub}",
+        "add rsp, 0x28",
+        "movdqu xmm6, [rsp + 0x00]",
+        "movdqu xmm7, [rsp + 0x10]",
+        "movdqu xmm8, [rsp + 0x20]",
+        "movdqu xmm9, [rsp + 0x30]",
+        "movdqu xmm10, [rsp + 0x40]",
+        "movdqu xmm11, [rsp + 0x50]",
+        "movdqu xmm12, [rsp + 0x60]",
+        "movdqu xmm13, [rsp + 0x70]",
+        "movdqu xmm14, [rsp + 0x80]",
+        "movdqu xmm15, [rsp + 0x90]",
+        "add rsp, 0xA0",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rdi",
+        "pop rsi",
+        "pop rbp",
+        "pop rbx",
+        "ret",
+        inner_stub = sym universal_stub_function,
+    );
+}
+
 #[no_mangle]
 pub unsafe extern "win64" fn universal_stub_function(
     rcx: usize,
@@ -120,6 +170,19 @@ pub unsafe extern "win64" fn universal_stub_function(
         )
     };
 
+    let call_inst_va = ret_addr.saturating_sub(6);
+    let iat_slot_va_val = if iat_va_str.starts_with("0x") {
+        u64::from_str_radix(&iat_va_str[2..], 16).unwrap_or(0)
+    } else {
+        0
+    };
+    let iat_slot_value =
+        if iat_slot_va_val != 0 && crate::mem::mmap::is_readable(iat_slot_va_val, 8) {
+            unsafe { *(iat_slot_va_val as *const u64) }
+        } else {
+            0
+        };
+
     if count < 50 {
         eprintln!(
             "========================================================\n\
@@ -129,8 +192,11 @@ pub unsafe extern "win64" fn universal_stub_function(
              symbol={}\n\
              ordinal={}\n\
              importer={}\n\
-             iat_va={}\n\
-             return_address=0x{:X}\n\
+             call_instruction_va=0x{:X}\n\
+             return_va=0x{:X}\n\
+             iat_slot_va=0x{:X}\n\
+             iat_slot_value=0x{:X}\n\
+             resolved_function_va=0x{:X}\n\
              caller_module={}\n\
              caller_rva={}\n\
              rsp=0x{:X}\n\
@@ -143,8 +209,11 @@ pub unsafe extern "win64" fn universal_stub_function(
             symbol_str,
             ordinal_str,
             importer_str,
-            iat_va_str,
+            call_inst_va,
             ret_addr,
+            iat_slot_va_val,
+            iat_slot_value,
+            iat_slot_value,
             caller_module_str,
             caller_rva_str,
             rsp_val,
@@ -245,7 +314,41 @@ pub unsafe extern "win64" fn universal_stub_function(
         eprintln!("[RINE UNRESOLVED CALL] Suppressing further logs (exceeded 50 calls)...");
     }
 
-    get_dummy_stub_buffer_ptr() as usize
+    eprintln!(
+        "========================================================\n\
+         [RINE UNRESOLVED API FATAL]\n\
+         dll={}\n\
+         symbol={}\n\
+         call_instruction_va=0x{:X}\n\
+         return_va=0x{:X}\n\
+         iat_slot_va=0x{:X}\n\
+         iat_slot_value=0x{:X}\n\
+         resolved_function_va=0x{:X}\n\
+         caller_rva={}\n\
+         stub_id={}\n\
+         registers: RCX=0x{:X}, RDX=0x{:X}, R8=0x{:X}, R9=0x{:X}, RSP=0x{:X}\n\
+         ========================================================\n\
+         [GUEST TERMINATED: UNRESOLVED API]",
+        dll_str,
+        symbol_str,
+        call_inst_va,
+        ret_addr,
+        iat_slot_va_val,
+        iat_slot_value,
+        iat_slot_value,
+        caller_rva_str,
+        stub_id_str,
+        rcx,
+        rdx,
+        r8,
+        r9,
+        rsp_val
+    );
+
+    crate::providers::record_unresolved_call(&dll_str, &symbol_str);
+    crate::providers::print_provider_stats();
+
+    std::process::exit(127);
 }
 
 pub struct UniversalDllRegistry {

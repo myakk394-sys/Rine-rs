@@ -197,6 +197,9 @@ impl ProcessEnvironment {
             std::ptr::write(teb_ptr, teb);
         }
 
+        crate::dlls::kernel32::set_current_peb_address(peb_addr);
+        crate::dlls::kernel32::set_current_image_base(image_base);
+
         Ok(Self {
             peb_region,
             teb_region,

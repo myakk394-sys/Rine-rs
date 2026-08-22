@@ -74,6 +74,24 @@ impl WindowRegistry {
                 height: 720,
                 visible: true,
             })
+        } else if global_window != 0 {
+            let dpy = unsafe { crate::windowing::x11::XOpenDisplay(std::ptr::null()) };
+            if !dpy.is_null() {
+                crate::windowing::x11::GLOBAL_DISPLAY
+                    .store(dpy as u64, std::sync::atomic::Ordering::SeqCst);
+                Some(RineWindow {
+                    guest_hwnd: hwnd,
+                    backend: WindowBackendType::X11,
+                    native_display: dpy,
+                    native_window: global_window,
+                    native_visual_id: 0,
+                    width: 1280,
+                    height: 720,
+                    visible: true,
+                })
+            } else {
+                None
+            }
         } else {
             None
         }

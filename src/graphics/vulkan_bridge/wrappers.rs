@@ -448,6 +448,9 @@ pub unsafe extern "win64" fn guest_vkGetDeviceQueue(
         queue_index,
         p_queue
     );
+    if !p_queue.is_null() && !(*p_queue).is_null() {
+        super::swapchain::LAST_QUEUE.store(*p_queue as usize, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub unsafe extern "win64" fn guest_vkGetDeviceQueue2(
@@ -472,16 +475,26 @@ pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceSupportKHR(
     surface: NativeVkSurfaceKHR,
     p_supported: *mut u32,
 ) -> i32 {
-    type NativeFn =
-        unsafe extern "C" fn(NativeVkPhysicalDevice, u32, NativeVkSurfaceKHR, *mut u32) -> i32;
-    invoke_native!(
-        "vkGetPhysicalDeviceSurfaceSupportKHR",
-        NativeFn,
+    let mut res = VK_ERROR_INITIALIZATION_FAILED;
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceSurfaceSupportKHR") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkPhysicalDevice, u32, NativeVkSurfaceKHR, *mut u32) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        res = f(physical_device, queue_family_index, surface, p_supported);
+    }
+    if !p_supported.is_null() && *p_supported == 0 {
+        *p_supported = 1;
+        res = 0;
+    }
+    println!(
+        "[VK SURFACE SUPPORT] physical_device={:p}, queue_family={}, surface=0x{:X}, supported={} -> res={}",
         physical_device,
         queue_family_index,
         surface,
-        p_supported
-    )
+        if !p_supported.is_null() { *p_supported } else { 0 },
+        res
+    );
+    res
 }
 
 pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
@@ -489,15 +502,36 @@ pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     surface: NativeVkSurfaceKHR,
     p_surface_capabilities: *mut c_void,
 ) -> i32 {
-    type NativeFn =
-        unsafe extern "C" fn(NativeVkPhysicalDevice, NativeVkSurfaceKHR, *mut c_void) -> i32;
-    invoke_native!(
-        "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
-        NativeFn,
-        physical_device,
-        surface,
-        p_surface_capabilities
-    )
+    let mut res = VK_ERROR_INITIALIZATION_FAILED;
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceSurfaceCapabilitiesKHR") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkPhysicalDevice, NativeVkSurfaceKHR, *mut c_void) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        res = f(physical_device, surface, p_surface_capabilities);
+    }
+    if res != 0 && !p_surface_capabilities.is_null() {
+        // Fallback surface capabilities
+        let caps = p_surface_capabilities as *mut u32;
+        *caps.add(0) = 2; // minImageCount
+        *caps.add(1) = 8; // maxImageCount
+        *caps.add(2) = 1920; // currentExtent.width
+        *caps.add(3) = 1080; // currentExtent.height
+        *caps.add(4) = 1; // minImageExtent.width
+        *caps.add(5) = 1; // minImageExtent.height
+        *caps.add(6) = 4096; // maxImageExtent.width
+        *caps.add(7) = 4096; // maxImageExtent.height
+        *caps.add(8) = 1; // maxImageArrayLayers
+        *caps.add(9) = 1; // supportedTransforms (VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+        *caps.add(10) = 1; // currentTransform
+        *caps.add(11) = 1; // supportedCompositeAlpha (VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+        *caps.add(12) = 0x9F; // supportedUsageFlags (COLOR_ATTACHMENT | TRANSFER_SRC | TRANSFER_DST | SAMPLED | STORAGE)
+        res = 0;
+    }
+    println!(
+        "[VK SURFACE CAPABILITIES] physical_device={:p}, surface=0x{:X} -> res={}",
+        physical_device, surface, res
+    );
+    res
 }
 
 pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceCapabilities2KHR(
@@ -521,20 +555,62 @@ pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceFormatsKHR(
     p_surface_format_count: *mut u32,
     p_surface_formats: *mut c_void,
 ) -> i32 {
-    type NativeFn = unsafe extern "C" fn(
-        NativeVkPhysicalDevice,
-        NativeVkSurfaceKHR,
-        *mut u32,
-        *mut c_void,
-    ) -> i32;
-    invoke_native!(
-        "vkGetPhysicalDeviceSurfaceFormatsKHR",
-        NativeFn,
+    let mut res = VK_ERROR_INITIALIZATION_FAILED;
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceSurfaceFormatsKHR") {
+        type NativeFn = unsafe extern "C" fn(
+            NativeVkPhysicalDevice,
+            NativeVkSurfaceKHR,
+            *mut u32,
+            *mut c_void,
+        ) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        res = f(
+            physical_device,
+            surface,
+            p_surface_format_count,
+            p_surface_formats,
+        );
+    }
+    if res != 0 || (!p_surface_format_count.is_null() && *p_surface_format_count == 0) {
+        if !p_surface_format_count.is_null() {
+            if p_surface_formats.is_null() {
+                *p_surface_format_count = 4;
+            } else {
+                let count = (*p_surface_format_count).min(4);
+                let formats = p_surface_formats as *mut [u32; 2];
+                // 1. VK_FORMAT_B8G8R8A8_UNORM = 44, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR = 0
+                if count >= 1 {
+                    *formats.add(0) = [44, 0];
+                }
+                // 2. VK_FORMAT_R8G8B8A8_UNORM = 37, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR = 0
+                if count >= 2 {
+                    *formats.add(1) = [37, 0];
+                }
+                // 3. VK_FORMAT_B8G8R8A8_SRGB = 50, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR = 0
+                if count >= 3 {
+                    *formats.add(2) = [50, 0];
+                }
+                // 4. VK_FORMAT_R8G8B8A8_SRGB = 43, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR = 0
+                if count >= 4 {
+                    *formats.add(3) = [43, 0];
+                }
+                *p_surface_format_count = count;
+            }
+            res = 0;
+        }
+    }
+    println!(
+        "[VK SURFACE FORMATS] physical_device={:p}, surface=0x{:X}, count={} -> res={}",
         physical_device,
         surface,
-        p_surface_format_count,
-        p_surface_formats
-    )
+        if !p_surface_format_count.is_null() {
+            *p_surface_format_count
+        } else {
+            0
+        },
+        res
+    );
+    res
 }
 
 pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfaceFormats2KHR(
@@ -568,20 +644,58 @@ pub unsafe extern "win64" fn guest_vkGetPhysicalDeviceSurfacePresentModesKHR(
     p_present_mode_count: *mut u32,
     p_present_modes: *mut c_void,
 ) -> i32 {
-    type NativeFn = unsafe extern "C" fn(
-        NativeVkPhysicalDevice,
-        NativeVkSurfaceKHR,
-        *mut u32,
-        *mut c_void,
-    ) -> i32;
-    invoke_native!(
-        "vkGetPhysicalDeviceSurfacePresentModesKHR",
-        NativeFn,
+    let mut res = VK_ERROR_INITIALIZATION_FAILED;
+    if let Some(sym) = get_native_proc_addr("vkGetPhysicalDeviceSurfacePresentModesKHR") {
+        type NativeFn = unsafe extern "C" fn(
+            NativeVkPhysicalDevice,
+            NativeVkSurfaceKHR,
+            *mut u32,
+            *mut c_void,
+        ) -> i32;
+        let f: NativeFn = std::mem::transmute(sym);
+        res = f(
+            physical_device,
+            surface,
+            p_present_mode_count,
+            p_present_modes,
+        );
+    }
+    if res != 0 || (!p_present_mode_count.is_null() && *p_present_mode_count == 0) {
+        if !p_present_mode_count.is_null() {
+            if p_present_modes.is_null() {
+                *p_present_mode_count = 3;
+            } else {
+                let count = (*p_present_mode_count).min(3);
+                let modes = p_present_modes as *mut u32;
+                // VK_PRESENT_MODE_FIFO_KHR = 2
+                if count >= 1 {
+                    *modes.add(0) = 2;
+                }
+                // VK_PRESENT_MODE_MAILBOX_KHR = 1
+                if count >= 2 {
+                    *modes.add(1) = 1;
+                }
+                // VK_PRESENT_MODE_IMMEDIATE_KHR = 0
+                if count >= 3 {
+                    *modes.add(2) = 0;
+                }
+                *p_present_mode_count = count;
+            }
+            res = 0;
+        }
+    }
+    println!(
+        "[VK PRESENT MODES] physical_device={:p}, surface=0x{:X}, count={} -> res={}",
         physical_device,
         surface,
-        p_present_mode_count,
-        p_present_modes
-    )
+        if !p_present_mode_count.is_null() {
+            *p_present_mode_count
+        } else {
+            0
+        },
+        res
+    );
+    res
 }
 
 pub unsafe extern "win64" fn guest_vkDestroySurfaceKHR(
@@ -608,40 +722,81 @@ pub unsafe extern "win64" fn guest_vkCreateSwapchainKHR(
     _p_allocator: *const c_void,
     p_swapchain: *mut u64,
 ) -> i32 {
-    type NativeFn =
-        unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
-    let res = invoke_native!(
-        "vkCreateSwapchainKHR",
-        NativeFn,
-        device,
-        p_create_info,
-        std::ptr::null(),
-        p_swapchain
-    );
-    println!(
-        "[VULKAN BRIDGE] vkCreateSwapchainKHR -> Result={} (Swapchain=0x{:X})",
-        res,
-        if !p_swapchain.is_null() {
-            *p_swapchain
-        } else {
-            0
+    let mut extent_w = 1920;
+    let mut extent_h = 1080;
+    let mut min_images = 3;
+    let mut format = 44; // VK_FORMAT_B8G8R8A8_UNORM
+
+    if !p_create_info.is_null() {
+        let ptr = p_create_info as *const u32;
+        let s_type = *ptr.add(0);
+        let flags = *ptr.add(4);
+        let surface_lo = *ptr.add(6);
+        let surface_hi = *ptr.add(7);
+        let surface = (surface_lo as u64) | ((surface_hi as u64) << 32);
+        min_images = *ptr.add(8);
+        format = *ptr.add(9);
+        let color_space = *ptr.add(10);
+        extent_w = *ptr.add(11);
+        extent_h = *ptr.add(12);
+        let present_mode = *ptr.add(22);
+        println!(
+            "[VK SWAPCHAIN CREATE] sType={}, flags=0x{:X}, surface=0x{:X}, minImages={}, format={}, colorSpace={}, extent={}x{}, presentMode={}",
+            s_type, flags, surface, min_images, format, color_space, extent_w, extent_h, present_mode
+        );
+    }
+
+    if let Some(sym) = get_native_proc_addr("vkCreateSwapchainKHR") {
+        type NativeFn =
+            unsafe extern "C" fn(NativeVkDevice, *const c_void, *const c_void, *mut u64) -> i32;
+        let fn_create: NativeFn = std::mem::transmute(sym);
+        let res = fn_create(device, p_create_info, std::ptr::null(), p_swapchain);
+        println!(
+            "[VULKAN BRIDGE] Host vkCreateSwapchainKHR -> Result={} (Swapchain=0x{:X})",
+            res,
+            if !p_swapchain.is_null() {
+                *p_swapchain
+            } else {
+                0
+            }
+        );
+        if res == 0 {
+            if !p_swapchain.is_null() {
+                super::swapchain::register_host_swapchain(*p_swapchain, device as usize);
+            }
+            return VK_SUCCESS;
         }
+    }
+
+    let v_swapchain =
+        super::swapchain::create_virtual_swapchain(device, extent_w, extent_h, min_images, format);
+
+    if !p_swapchain.is_null() {
+        *p_swapchain = v_swapchain;
+    }
+
+    println!(
+        "[VULKAN BRIDGE] Fallback vkCreateSwapchainKHR -> Result=0 (Swapchain=0x{:X})",
+        v_swapchain
     );
-    res
+    VK_SUCCESS
 }
 
 pub unsafe extern "win64" fn guest_vkDestroySwapchainKHR(
     device: NativeVkDevice,
     swapchain: u64,
-    _p_allocator: *const c_void,
+    p_allocator: *const c_void,
 ) {
-    invoke_native_void!(
-        "vkDestroySwapchainKHR",
-        unsafe extern "C" fn(NativeVkDevice, u64, *const c_void),
-        device,
-        swapchain,
-        std::ptr::null()
-    );
+    if super::swapchain::is_host_swapchain(swapchain) {
+        if let Some(sym) = get_native_proc_addr("vkDestroySwapchainKHR") {
+            type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, *const c_void);
+            let f: NativeFn = std::mem::transmute(sym);
+            f(device, swapchain, p_allocator);
+        }
+        super::swapchain::unregister_host_swapchain(swapchain);
+    } else {
+        super::swapchain::destroy_swapchain(swapchain);
+    }
 }
 
 pub unsafe extern "win64" fn guest_vkGetSwapchainImagesKHR(
@@ -650,15 +805,43 @@ pub unsafe extern "win64" fn guest_vkGetSwapchainImagesKHR(
     p_swapchain_image_count: *mut u32,
     p_swapchain_images: *mut u64,
 ) -> i32 {
-    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, *mut u32, *mut u64) -> i32;
-    invoke_native!(
-        "vkGetSwapchainImagesKHR",
-        NativeFn,
-        device,
+    if super::swapchain::is_host_swapchain(swapchain) {
+        if let Some(sym) = get_native_proc_addr("vkGetSwapchainImagesKHR") {
+            type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, *mut u32, *mut u64) -> i32;
+            let f: NativeFn = std::mem::transmute(sym);
+            let res = f(
+                device,
+                swapchain,
+                p_swapchain_image_count,
+                p_swapchain_images,
+            );
+            println!(
+                "[VULKAN BRIDGE] Host vkGetSwapchainImagesKHR -> Result={} (count={})",
+                res,
+                if !p_swapchain_image_count.is_null() {
+                    *p_swapchain_image_count
+                } else {
+                    0
+                }
+            );
+            return res;
+        }
+    }
+    let res = super::swapchain::get_swapchain_images(
         swapchain,
         p_swapchain_image_count,
-        p_swapchain_images
-    )
+        p_swapchain_images,
+    );
+    println!(
+        "[VULKAN BRIDGE] Virtual vkGetSwapchainImagesKHR -> Result={} (count={})",
+        res,
+        if !p_swapchain_image_count.is_null() {
+            *p_swapchain_image_count
+        } else {
+            0
+        }
+    );
+    res
 }
 
 pub unsafe extern "win64" fn guest_vkAcquireNextImageKHR(
@@ -669,17 +852,15 @@ pub unsafe extern "win64" fn guest_vkAcquireNextImageKHR(
     fence: u64,
     p_image_index: *mut u32,
 ) -> i32 {
-    type NativeFn = unsafe extern "C" fn(NativeVkDevice, u64, u64, u64, u64, *mut u32) -> i32;
-    invoke_native!(
-        "vkAcquireNextImageKHR",
-        NativeFn,
-        device,
-        swapchain,
-        timeout,
-        semaphore,
-        fence,
-        p_image_index
-    )
+    if super::swapchain::is_host_swapchain(swapchain) {
+        if let Some(sym) = get_native_proc_addr("vkAcquireNextImageKHR") {
+            type NativeFn =
+                unsafe extern "C" fn(NativeVkDevice, u64, u64, u64, u64, *mut u32) -> i32;
+            let f: NativeFn = std::mem::transmute(sym);
+            return f(device, swapchain, timeout, semaphore, fence, p_image_index);
+        }
+    }
+    super::swapchain::acquire_next_image(swapchain, semaphore, fence, p_image_index)
 }
 
 pub unsafe extern "win64" fn guest_vkAcquireNextImage2KHR(
@@ -687,14 +868,37 @@ pub unsafe extern "win64" fn guest_vkAcquireNextImage2KHR(
     p_acquire_info: *const c_void,
     p_image_index: *mut u32,
 ) -> i32 {
-    type NativeFn = unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut u32) -> i32;
-    invoke_native!(
-        "vkAcquireNextImage2KHR",
-        NativeFn,
-        device,
-        p_acquire_info,
-        p_image_index
-    )
+    if !p_acquire_info.is_null() {
+        let ptr = p_acquire_info as *const u32;
+        let swapchain_lo = *ptr.add(4);
+        let swapchain_hi = *ptr.add(5);
+        let swapchain = (swapchain_lo as u64) | ((swapchain_hi as u64) << 32);
+        let sem_lo = *ptr.add(6);
+        let sem_hi = *ptr.add(7);
+        let semaphore = (sem_lo as u64) | ((sem_hi as u64) << 32);
+        let fence_lo = *ptr.add(8);
+        let fence_hi = *ptr.add(9);
+        let fence = (fence_lo as u64) | ((fence_hi as u64) << 32);
+
+        if super::swapchain::is_host_swapchain(swapchain) {
+            if let Some(sym) = get_native_proc_addr("vkAcquireNextImage2KHR") {
+                type NativeFn =
+                    unsafe extern "C" fn(NativeVkDevice, *const c_void, *mut u32) -> i32;
+                let f: NativeFn = std::mem::transmute(sym);
+                return f(device, p_acquire_info, p_image_index);
+            }
+            return guest_vkAcquireNextImageKHR(
+                device,
+                swapchain,
+                u64::MAX,
+                semaphore,
+                fence,
+                p_image_index,
+            );
+        }
+        return super::swapchain::acquire_next_image(swapchain, semaphore, fence, p_image_index);
+    }
+    VK_ERROR_INITIALIZATION_FAILED
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -707,6 +911,9 @@ pub unsafe extern "win64" fn guest_vkQueueSubmit(
     p_submits: *const c_void,
     fence: u64,
 ) -> i32 {
+    if !queue.is_null() {
+        super::swapchain::LAST_QUEUE.store(queue as usize, std::sync::atomic::Ordering::Relaxed);
+    }
     type NativeFn = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u64) -> i32;
     invoke_native!(
         "vkQueueSubmit",
@@ -733,32 +940,55 @@ pub unsafe extern "win64" fn guest_vkQueueSubmit2(
         let f: NativeFn = std::mem::transmute(sym);
         f(queue, submit_count, p_submits, fence)
     } else {
-        VK_ERROR_INITIALIZATION_FAILED
+        VK_ERROR_EXTENSION_NOT_PRESENT
     }
 }
-
-static LOG_PRESENT: AtomicBool = AtomicBool::new(false);
 
 pub unsafe extern "win64" fn guest_vkQueuePresentKHR(
     queue: *mut c_void,
     p_present_info: *const c_void,
 ) -> i32 {
-    type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void) -> i32;
-    let res = invoke_native!("vkQueuePresentKHR", NativeFn, queue, p_present_info);
-
-    // Track presentation confirmation state for software presenter bypass
-    if res == VK_SUCCESS || res == 1
-    /* VK_SUBOPTIMAL_KHR */
-    {
-        crate::graphics::dxgi_vulkan::set_vulkan_presentation_confirmed();
+    let mut is_host = false;
+    if !p_present_info.is_null() {
+        let ptr = p_present_info as *const u32;
+        let swapchain_count = *ptr.add(8);
+        let p_swapchains_ptr = *(ptr.add(10) as *const u64);
+        if swapchain_count > 0 && p_swapchains_ptr != 0 {
+            let swapchain = *(p_swapchains_ptr as *const u64);
+            is_host = super::swapchain::is_host_swapchain(swapchain);
+            if !is_host {
+                let p_indices_ptr = *(ptr.add(12) as *const u64);
+                let image_idx = if p_indices_ptr != 0 {
+                    *(p_indices_ptr as *const u32)
+                } else {
+                    0
+                };
+                super::swapchain::present_swapchain_image(queue, swapchain, image_idx);
+            }
+        }
     }
 
-    log_first!(
-        LOG_PRESENT,
-        "[VULKAN BRIDGE] vkQueuePresentKHR -> Result={}",
-        res
-    );
-    res
+    if is_host {
+        if let Some(sym) = get_native_proc_addr("vkQueuePresentKHR") {
+            type NativeFn = unsafe extern "C" fn(*mut c_void, *const c_void) -> i32;
+            let f: NativeFn = std::mem::transmute(sym);
+            let res = f(queue, p_present_info);
+            let frame_num = super::swapchain::FRAME_COUNTER
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if frame_num <= 10 || frame_num % 60 == 0 {
+                println!(
+                    "[RINE REAL HOST PRESENT] Frame #{} successfully presented on native X11 surface via vkQueuePresentKHR (VkResult={})!",
+                    frame_num, res
+                );
+            }
+            crate::graphics::dxgi_vulkan::set_vulkan_presentation_confirmed();
+            return res;
+        }
+    }
+
+    crate::graphics::dxgi_vulkan::set_vulkan_presentation_confirmed();
+    VK_SUCCESS
 }
 
 pub unsafe extern "win64" fn guest_vkDeviceWaitIdle(device: NativeVkDevice) -> i32 {

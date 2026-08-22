@@ -20,6 +20,23 @@ pub fn is_main_thread() -> bool {
     }
 }
 
+pub fn resolve_rip_module(rip: u64) -> (u64, u64, &'static str) {
+    if rip >= 0x0000000140000000 && rip < 0x0000000145000000 {
+        return (0x0000000140000000, rip - 0x0000000140000000, "main_exe");
+    }
+    if rip >= 0x0000000359050000 && rip < 0x0000000360000000 {
+        return (0x0000000359050000, rip - 0x0000000359050000, "d3d11.dll");
+    }
+    if rip >= 0x00000002EDF00000 && rip < 0x00000002F0000000 {
+        return (0x00000002EDF00000, rip - 0x00000002EDF00000, "dxgi.dll");
+    }
+    let main_base = crate::dlls::kernel32::get_current_image_base();
+    if main_base > 0 && rip >= main_base && rip < main_base + 0x10000000 {
+        return (main_base, rip - main_base, "main_exe");
+    }
+    (0, 0, "unknown_module")
+}
+
 #[inline(always)]
 fn safe_read_u32(addr: u64) -> Option<u32> {
     if addr < 0x10000 || addr >= 0x7FFFFFFFFFFF {
@@ -37,7 +54,7 @@ extern "C" fn worker_thread_exit_stub() -> ! {
     }
 }
 
-extern "C" fn rine_signal_handler(sig: c_int, _info: *mut siginfo_t, ucontext: *mut c_void) {
+extern "C" fn rine_signal_handler(sig: c_int, info: *mut siginfo_t, ucontext: *mut c_void) {
     eprintln!("\n========================================================");
     eprintln!("[RINE SIGNAL HANDLER] CAUGHT POSIX SIGNAL {}!", sig);
     if !ucontext.is_null() {
@@ -75,8 +92,8 @@ extern "C" fn rine_signal_handler(sig: c_int, _info: *mut siginfo_t, ucontext: *
             let r14 = mctx.gregs[libc::REG_R14 as usize] as u64;
             let r15 = mctx.gregs[libc::REG_R15 as usize] as u64;
 
-            let fault_addr = if !_info.is_null() {
-                (*_info).si_addr() as u64
+            let fault_addr = if !info.is_null() {
+                (*info).si_addr() as u64
             } else {
                 0
             };
@@ -121,138 +138,81 @@ extern "C" fn rine_signal_handler(sig: c_int, _info: *mut siginfo_t, ucontext: *
                 }
             }
             eprintln!("========================================================\n");
-            if rip < 0x10000 {
-                if is_main_thread() {
-                    eprintln!("[RINE SIGNAL HANDLER] Main thread zero RIP (0x{:016X}) detected. Redirecting to active main render loop stub...", rip);
-                    let stub_addr =
-                        crate::sys::trampoline::rine_exit_thread_stub as *const () as u64;
-                    (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] = stub_addr as i64;
-                    (*uctx).uc_mcontext.gregs[libc::REG_RDI as usize] = 0; // exit_code = 0
-                    return;
-                } else {
-                    eprintln!("[RINE SIGNAL HANDLER] Worker thread zero RIP (0x{:016X}) detected. Exiting worker thread gracefully...", rip);
-                    let stub_addr = worker_thread_exit_stub as *const () as u64;
-                    (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] = stub_addr as i64;
-                    return;
-                }
-            } else if sig == libc::SIGSEGV || sig == libc::SIGILL {
-                let img_base = crate::dlls::kernel32::get_current_image_base();
-                let img_end = img_base + 0x20000000; // 512MB process image range
+            let fault_addr = if !info.is_null() {
+                (*info).si_addr() as u64
+            } else {
+                0
+            };
 
-                if rip >= img_base && rip < img_end {
-                    let op_opt = safe_read_u32(rip);
-                    let op32 = op_opt.unwrap_or(0);
-                    let is_null_op =
-                        op_opt.is_none() || op32 == 0 || op32 == 0xFFFFFFFF || op32 == 0x25048B48;
+            let (mod_base, rva, mod_name) = resolve_rip_module(rip);
+            let role = if is_main_thread() { "main" } else { "worker" };
+            let thread_id = libc::syscall(libc::SYS_gettid) as u64;
 
-                    if is_null_op {
-                        if op32 == 0x25048B48 {
-                            eprintln!("[RINE SIGNAL HANDLER] CRT fastfail assertion at RIP 0x{:016X}. Bypassing assertion trap...", rip);
-                            (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] = (rip + 10) as i64;
-                            return;
-                        }
+            eprintln!("========================================================");
+            eprintln!("[RINE GUEST CRASH]");
+            eprintln!("  signal={}", sig);
+            eprintln!("  thread_role={}", role);
+            eprintln!("  guest_thread_id={}", thread_id);
+            eprintln!("  rip=0x{:016X}", rip);
+            eprintln!("  rva=0x{:08X}", rva);
+            eprintln!("  fault_address=0x{:016X}", fault_addr);
+            eprintln!("  guest_module={} (base=0x{:016X})", mod_name, mod_base);
+            eprintln!("  rax=0x{:016X}", rax);
+            eprintln!("  rbx=0x{:016X}", rbx);
+            eprintln!("  rcx=0x{:016X}", rcx);
+            eprintln!("  rdx=0x{:016X}", rdx);
+            eprintln!("  rsi=0x{:016X}", rsi);
+            eprintln!("  rdi=0x{:016X}", rdi);
+            eprintln!("  rsp=0x{:016X}", rsp);
+            eprintln!("  rbp=0x{:016X}", rbp);
+            eprintln!("  r8 =0x{:016X}", r8);
+            eprintln!("  r9 =0x{:016X}", r9);
+            eprintln!("  r10=0x{:016X}", r10);
+            eprintln!("  r11=0x{:016X}", r11);
+            eprintln!("  r12=0x{:016X}", r12);
+            eprintln!("  r13=0x{:016X}", r13);
+            eprintln!("  r14=0x{:016X}", r14);
+            eprintln!("  r15=0x{:016X}", r15);
 
-                        eprintln!("[RINE SIGNAL HANDLER] NULL function pointer jump detected at RIP 0x{:016X} (op32=0x{:08X}). Redirecting to dummy stub return...", rip, op32);
-                        let stub_addr = crate::dlls::registry::get_dummy_stub_buffer_ptr() as u64;
-                        (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] = stub_addr as i64;
-                        return;
-                    }
-                }
+            if let Some(obj) = crate::dlls::object_registry::lookup_rine_object(rsi) {
+                eprintln!(
+                    "[CRASH OBJECT MATCH (RSI)] id={} creator={} vtable=0x{:016X} interface={}",
+                    obj.object_id, obj.creator_symbol, obj.vtable_address, obj.interface_name
+                );
+            }
+            if let Some(obj) = crate::dlls::object_registry::lookup_rine_object(rax) {
+                eprintln!(
+                    "[CRASH OBJECT MATCH (RAX)] id={} creator={} vtable=0x{:016X} interface={}",
+                    obj.object_id, obj.creator_symbol, obj.vtable_address, obj.interface_name
+                );
+            }
 
-                let mut recovered = false;
-
-                let is_invalid =
-                    |val: u64| val == 0 || (val >> 32) == 0x6567B63F || val > 0x7FFFFFFFFFFF;
-                let is_in_image = |val: u64| val >= img_base && val < img_end;
-
-                let alloc_real_lock = || unsafe {
-                    let ptr = libc::mmap(
-                        std::ptr::null_mut(),
-                        65536,
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                        -1,
-                        0,
-                    );
-                    if ptr == libc::MAP_FAILED || ptr.is_null() {
-                        0
-                    } else {
-                        ptr as u64
-                    }
-                };
-
-                let check_and_fix_reg = |reg_val: u64| -> Option<u64> {
-                    if is_invalid(reg_val) {
-                        Some(alloc_real_lock())
-                    } else if is_in_image(reg_val) {
-                        let ptr_loc = reg_val as *mut u64;
-                        let inner_val = *ptr_loc;
-                        if is_invalid(inner_val) {
-                            let heap_lock = alloc_real_lock();
-                            *ptr_loc = heap_lock;
-                            Some(heap_lock)
+            if rsp > 0x10000 && rsp < 0x7FFFFFFFFFFF {
+                let rsp_ptr = rsp as *const u64;
+                eprintln!("--- STACK TRACE (RSP top 16 words) ---");
+                for i in 0..16 {
+                    let target_ptr = rsp_ptr.add(i);
+                    if (target_ptr as usize) % 8 == 0
+                        && (target_ptr as usize) > 0x10000
+                        && (target_ptr as usize) < 0x7FFFFFFFFFFF
+                    {
+                        let val = *target_ptr;
+                        let (val_base, val_rva, _) = resolve_rip_module(val);
+                        if val_base > 0 {
+                            eprintln!(
+                                "  [RSP + 0x{:02X}] = 0x{:016X} (RVA: 0x{:08X})",
+                                i * 8,
+                                val,
+                                val_rva
+                            );
                         } else {
-                            None
+                            eprintln!("  [RSP + 0x{:02X}] = 0x{:016X}", i * 8, val);
                         }
-                    } else {
-                        None
                     }
-                };
-
-                let rsi_val = (*uctx).uc_mcontext.gregs[libc::REG_RSI as usize] as u64;
-                if let Some(fixed) = check_and_fix_reg(rsi_val) {
-                    (*uctx).uc_mcontext.gregs[libc::REG_RSI as usize] = fixed as i64;
-                    recovered = true;
-                }
-
-                let rbx_val = (*uctx).uc_mcontext.gregs[libc::REG_RBX as usize] as u64;
-                if let Some(fixed) = check_and_fix_reg(rbx_val) {
-                    (*uctx).uc_mcontext.gregs[libc::REG_RBX as usize] = fixed as i64;
-                    recovered = true;
-                }
-
-                let rdx_val = (*uctx).uc_mcontext.gregs[libc::REG_RDX as usize] as u64;
-                if let Some(fixed) = check_and_fix_reg(rdx_val) {
-                    (*uctx).uc_mcontext.gregs[libc::REG_RDX as usize] = fixed as i64;
-                    recovered = true;
-                }
-
-                let rcx_val = (*uctx).uc_mcontext.gregs[libc::REG_RCX as usize] as u64;
-                if let Some(fixed) = check_and_fix_reg(rcx_val) {
-                    (*uctx).uc_mcontext.gregs[libc::REG_RCX as usize] = fixed as i64;
-                    recovered = true;
-                }
-
-                let rax_val = (*uctx).uc_mcontext.gregs[libc::REG_RAX as usize] as u64;
-                if let Some(fixed) = check_and_fix_reg(rax_val) {
-                    (*uctx).uc_mcontext.gregs[libc::REG_RAX as usize] = fixed as i64;
-                    recovered = true;
-                }
-
-                let r8_val = (*uctx).uc_mcontext.gregs[libc::REG_R8 as usize] as u64;
-                if is_invalid(r8_val) {
-                    let heap_lock = alloc_real_lock();
-                    (*uctx).uc_mcontext.gregs[libc::REG_R8 as usize] = heap_lock as i64;
-                    recovered = true;
-                }
-
-                let r9_val = (*uctx).uc_mcontext.gregs[libc::REG_R9 as usize] as u64;
-                if is_invalid(r9_val) {
-                    let heap_lock = alloc_real_lock();
-                    (*uctx).uc_mcontext.gregs[libc::REG_R9 as usize] = heap_lock as i64;
-                    recovered = true;
-                }
-
-                if recovered {
-                    let rsp = (*uctx).uc_mcontext.gregs[libc::REG_RSP as usize] as u64;
-                    if rsp & 0xF != 0 {
-                        // Align RSP to 16-byte boundary to satisfy SSE (movaps) alignment requirements
-                        (*uctx).uc_mcontext.gregs[libc::REG_RSP as usize] = (rsp & !0xF) as i64;
-                    }
-                    eprintln!("[RINE SIGNAL HANDLER] Dynamically allocated real heap lock for process VA at RIP 0x{:016X}.", rip);
-                    return;
                 }
             }
+            eprintln!("========================================================\n");
+            std::process::exit(128 + sig);
         }
     }
     std::process::exit(128 + sig);
