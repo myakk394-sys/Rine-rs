@@ -131,6 +131,15 @@ mod tests {
 
         let sym_end_cmd = resolve_vulkan_symbol("vkEndCommandBuffer");
         assert!(sym_end_cmd.is_some(), "vkEndCommandBuffer must resolve");
+
+        let sym_bind_ds2 = resolve_vulkan_symbol("vkCmdBindDescriptorSets2KHR");
+        assert!(sym_bind_ds2.is_some(), "vkCmdBindDescriptorSets2KHR must resolve");
+
+        let sym_push_c2 = resolve_vulkan_symbol("vkCmdPushConstants2KHR");
+        assert!(sym_push_c2.is_some(), "vkCmdPushConstants2KHR must resolve");
+
+        let sym_wait_pres = resolve_vulkan_symbol("vkWaitForPresentKHR");
+        assert!(sym_wait_pres.is_some(), "vkWaitForPresentKHR must resolve");
     }
 
     #[test]

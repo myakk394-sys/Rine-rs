@@ -16,8 +16,18 @@ pub fn resolve_vulkan_symbol(fn_name: &str) -> Option<usize> {
 }
 
 const DXVK_SEARCH_PATHS: &[&str] = &[
+    // Native Steam Proton (Arch Linux / standard)
+    "/home/fizzy/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/dxvk/x86_64-windows",
+    "/home/fizzy/.local/share/Steam/steamapps/common/Proton 9.0 (Beta)/files/lib/wine/dxvk/x86_64-windows",
+    "/home/fizzy/.local/share/Steam/steamapps/common/Proton 8.0/files/lib/wine/dxvk/x86_64-windows",
+    "/home/fizzy/.steam/steam/steamapps/common/Proton - Experimental/files/lib/wine/dxvk/x86_64-windows",
     // Bottles (Flatpak)
     "/home/fizzy/.var/app/com.usebottles.bottles/data/bottles/dxvk/dxvk-2.7.1/x64",
+    // Heroic Games Launcher
+    "/home/fizzy/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/dxvk/dxvk-3.0.2/x64",
+    "/home/fizzy/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/dxvk/dxvk-2.7.1/x64",
+    // Steam Proton Experimental (Snap)
+    "/home/fizzy/snap/steam/common/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/dxvk/x86_64-windows",
     // Vinegar / Heroic / Lutris common paths
     "/home/fizzy/.local/share/dxvk/x64",
     "/usr/share/dxvk/x64",
@@ -41,6 +51,13 @@ static DXVK_D3D11: OnceLock<Option<DxvkPeModule>> = OnceLock::new();
 /// Finds and stores the DXVK directory path.
 pub fn find_dxvk_path() -> Option<&'static str> {
     DXVK_DIR.get_or_init(|| {
+        if let Ok(env_path) = std::env::var("RINE_DXVK_PATH") {
+            let dxgi = format!("{}/dxgi.dll", env_path);
+            if std::path::Path::new(&dxgi).exists() {
+                println!("[DXVK LOADER] Using RINE_DXVK_PATH: {}", env_path);
+                return env_path;
+            }
+        }
         for path in DXVK_SEARCH_PATHS {
             if std::path::Path::new(path).exists() {
                 let dxgi = format!("{}/dxgi.dll", path);
@@ -123,6 +140,19 @@ fn load_dxvk_dll(dxvk_dir: &str, dll_name: &str) -> Option<DxvkPeModule> {
     );
     for (name, addr) in exports.iter().take(6) {
         println!("  [DXVK] {}!{} @ 0x{:016X}", dll_name, name, addr);
+    }
+
+    if module.entry_point != 0 {
+        unsafe {
+            let dll_main: unsafe extern "win64" fn(usize, u32, usize) -> i32 =
+                std::mem::transmute(module.entry_point);
+            println!(
+                "[DXVK LOADER] Invoking DllMain for {} @ 0x{:016X}",
+                dll_name, module.entry_point
+            );
+            let res = dll_main(module.image_base, 1 /* DLL_PROCESS_ATTACH */, 0);
+            println!("[DXVK LOADER] DllMain for {} returned {}", dll_name, res);
+        }
     }
 
     let result = DxvkPeModule {
@@ -231,7 +261,8 @@ fn parse_pe_exports(image_base: usize, raw_pe_bytes: &[u8]) -> HashMap<String, u
 
             // Check for forwarder (fn_rva inside export section)
             if fn_rva >= export_rva && fn_rva < export_rva + export_size {
-                // Forwarder string — skip for now
+                // Forwarder string (skip for now)
+                // Строка перенаправления экспорта (пропуск)
                 continue;
             }
 
@@ -241,4 +272,78 @@ fn parse_pe_exports(image_base: usize, raw_pe_bytes: &[u8]) -> HashMap<String, u
     }
 
     exports
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_dxvk_path() {
+        let path = find_dxvk_path();
+        println!("Found DXVK path: {:?}", path);
+        assert!(path.is_some(), "DXVK should be found on system");
+        let p = path.unwrap();
+        assert!(std::path::Path::new(&format!("{}/dxgi.dll", p)).exists());
+        assert!(std::path::Path::new(&format!("{}/d3d11.dll", p)).exists());
+    }
+
+    #[test]
+    fn test_unity_diagnostics() {
+        let _guard = crate::providers::STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let unity_player_path = "/home/fizzy/.local/share/Steam/steamapps/common/How to Fish/How to Fish/UnityPlayer.dll";
+        if !std::path::Path::new(unity_player_path).exists() {
+            println!("UnityPlayer.dll not found, skipping");
+            return;
+        }
+
+        // Initialize DXVK so DXVK symbols can be resolved
+        if let Some(path) = find_dxvk_path() {
+            preload_dxvk(path);
+        }
+
+        let bytes = std::fs::read(unity_player_path).expect("Failed to read UnityPlayer.dll");
+        let pe = crate::pe::PeImage::parse(&bytes).expect("Failed to parse UnityPlayer.dll");
+
+        let mut total_imports = 0;
+        let mut resolved_imports = 0;
+        let mut unresolved_imports = Vec::new();
+        let mut target_dll_status: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+
+        let target_dlls = ["dxgi.dll", "d3d11.dll", "user32.dll", "gdi32.dll", "kernel32.dll"];
+
+        for (dll, funcs) in pe.imports() {
+            let dll_lower = dll.to_lowercase();
+            let is_target = target_dlls.iter().any(|t| *t == dll_lower || dll_lower.starts_with(t.trim_end_matches(".dll")));
+
+            for (fn_name, _) in funcs {
+                total_imports += 1;
+                let resolved = crate::providers::RineApiResolver::resolve_symbol(&dll, &fn_name).is_some();
+                if resolved {
+                    resolved_imports += 1;
+                } else {
+                    unresolved_imports.push((dll.clone(), fn_name.clone()));
+                }
+
+                if is_target {
+                    target_dll_status.entry(dll_lower.clone()).or_default().push((fn_name.to_string(), resolved));
+                }
+            }
+        }
+
+        println!("=== UNITYPLAYER.DLL IMPORT DIAGNOSTICS ===");
+        println!("Total Imports: {}, Resolved: {}, Unresolved: {}", total_imports, resolved_imports, unresolved_imports.len());
+
+        for (dll, funcs) in &target_dll_status {
+            let res_count = funcs.iter().filter(|(_, r)| *r).count();
+            println!("\n--- {} (Resolved {} / {}) ---", dll, res_count, funcs.len());
+            for (fn_name, res) in funcs {
+                if !res {
+                    println!("  [MISSING/STUB] {}", fn_name);
+                } else {
+                    println!("  [RESOLVED]     {}", fn_name);
+                }
+            }
+        }
+    }
 }

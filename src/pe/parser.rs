@@ -158,7 +158,9 @@ impl<'a> PeImage<'a> {
 
                         // Top bit 63 set = import by ordinal
                         if (thunk_val & 0x8000_0000_0000_0000) != 0 {
-                            funcs.push(("ordinal_stub", iat_rva_idx));
+                            let ord = (thunk_val & 0xFFFF) as u16;
+                            let mapped_name = resolve_ordinal_name(dll_name, ord);
+                            funcs.push((mapped_name, iat_rva_idx));
                         } else {
                             let name_entry_rva = (thunk_val & 0x7FFF_FFFF) as u32;
                             if let Some(fn_offset) = self.rva_to_offset(name_entry_rva) {
@@ -191,6 +193,176 @@ impl<'a> PeImage<'a> {
         }
 
         import_list
+    }
+
+    /// Returns list of exported symbols with (func_name, rva, ordinal).
+    pub fn exports(&self) -> Vec<(&str, u32, u32)> {
+        let mut export_list = Vec::new();
+        let export_dir_entry = &self.optional_header.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if export_dir_entry.virtual_address() == 0 || export_dir_entry.size() == 0 {
+            return export_list;
+        }
+
+        if let Some(exp_offset) = self.rva_to_offset(export_dir_entry.virtual_address()) {
+            if exp_offset + std::mem::size_of::<ImageExportDirectory>() > self.raw_data.len() {
+                return export_list;
+            }
+
+            let exp = unsafe {
+                &*(self.raw_data.as_ptr().add(exp_offset) as *const ImageExportDirectory)
+            };
+
+            let num_names = exp.number_of_names as usize;
+            let num_funcs = exp.number_of_functions as usize;
+            let base_ord = exp.base;
+
+            if let (Some(names_off), Some(ords_off), Some(funcs_off)) = (
+                self.rva_to_offset(exp.address_of_names),
+                self.rva_to_offset(exp.address_of_name_ordinals),
+                self.rva_to_offset(exp.address_of_functions),
+            ) {
+                for i in 0..num_names {
+                    if names_off + (i + 1) * 4 > self.raw_data.len()
+                        || ords_off + (i + 1) * 2 > self.raw_data.len()
+                    {
+                        break;
+                    }
+
+                    let name_rva =
+                        unsafe { *(self.raw_data.as_ptr().add(names_off + i * 4) as *const u32) };
+                    let ord_idx = unsafe {
+                        *(self.raw_data.as_ptr().add(ords_off + i * 2) as *const u16) as usize
+                    };
+
+                    if ord_idx >= num_funcs || funcs_off + (ord_idx + 1) * 4 > self.raw_data.len() {
+                        continue;
+                    }
+
+                    let func_rva = unsafe {
+                        *(self.raw_data.as_ptr().add(funcs_off + ord_idx * 4) as *const u32)
+                    };
+
+                    if let Some(fn_name_off) = self.rva_to_offset(name_rva) {
+                        let mut end = fn_name_off;
+                        while end < self.raw_data.len() && self.raw_data[end] != 0 {
+                            end += 1;
+                        }
+                        if let Ok(name_str) = std::str::from_utf8(&self.raw_data[fn_name_off..end])
+                        {
+                            export_list.push((name_str, func_rva, base_ord + ord_idx as u32));
+                        }
+                    }
+                }
+            }
+        }
+
+        export_list
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ImageExportDirectory {
+    pub characteristics: u32,
+    pub time_date_stamp: u32,
+    pub major_version: u16,
+    pub minor_version: u16,
+    pub name: u32,
+    pub base: u32,
+    pub number_of_functions: u32,
+    pub number_of_names: u32,
+    pub address_of_functions: u32,
+    pub address_of_names: u32,
+    pub address_of_name_ordinals: u32,
+}
+
+pub fn resolve_ordinal_name(dll_name: &str, ordinal: u16) -> &'static str {
+    let dll_upper = dll_name.to_ascii_uppercase();
+    if dll_upper.starts_with("WS2_32") || dll_upper.starts_with("WSOCK32") {
+        match ordinal {
+            1 => "accept",
+            2 => "bind",
+            3 => "closesocket",
+            4 => "connect",
+            5 => "getpeername",
+            6 => "getsockname",
+            7 => "getsockopt",
+            8 => "htonl",
+            9 => "htons",
+            10 => "ioctlsocket",
+            11 => "inet_addr",
+            12 => "inet_ntoa",
+            13 => "listen",
+            14 => "ntohl",
+            15 => "ntohs",
+            16 => "recv",
+            17 => "recvfrom",
+            18 => "select",
+            19 => "send",
+            20 => "sendto",
+            21 => "setsockopt",
+            22 => "shutdown",
+            23 => "socket",
+            51 => "gethostbyaddr",
+            52 => "gethostbyname",
+            53 => "getprotobyname",
+            54 => "getprotobynumber",
+            55 => "getservbyname",
+            56 => "getservbyport",
+            57 => "gethostname",
+            101 => "WSAAsyncSelect",
+            102 => "WSAAsyncGetHostByAddr",
+            103 => "WSAAsyncGetHostByName",
+            104 => "WSAAsyncGetProtoByNumber",
+            105 => "WSAAsyncGetProtoByName",
+            106 => "WSAAsyncGetServByPort",
+            107 => "WSAAsyncGetServByName",
+            108 => "WSACancelAsyncRequest",
+            109 => "WSASetBlockingHook",
+            110 => "WSAUnhookBlockingHook",
+            111 => "WSAGetLastError",
+            112 => "WSASetLastError",
+            113 => "WSACancelBlockingCall",
+            114 => "WSAIsBlocking",
+            115 => "WSAStartup",
+            116 => "WSACleanup",
+            151 => "__WSAFDIsSet",
+            _ => "ordinal_stub",
+        }
+    } else if dll_upper.starts_with("OLEAUT32") {
+        match ordinal {
+            2 => "SysAllocString",
+            3 => "SysReAllocString",
+            4 => "SysAllocStringLen",
+            5 => "SysReAllocStringLen",
+            6 => "SysFreeString",
+            7 => "SysStringLen",
+            8 => "VariantInit",
+            9 => "VariantClear",
+            10 => "VariantCopy",
+            11 => "VariantCopyInd",
+            12 => "VariantChangeType",
+            15 => "SafeArrayCreate",
+            16 => "SafeArrayDestroy",
+            17 => "SafeArrayGetDim",
+            18 => "SafeArrayGetElemsize",
+            19 => "SafeArrayGetUBound",
+            20 => "SafeArrayGetLBound",
+            21 => "SafeArrayLock",
+            22 => "SafeArrayUnlock",
+            23 => "SafeArrayAccessData",
+            24 => "SafeArrayUnaccessData",
+            25 => "SafeArrayGetElement",
+            26 => "SafeArrayPutElement",
+            77 => "SafeArrayGetVartype",
+            147 => "VariantChangeTypeEx",
+            148 => "SafeArrayPtrOfIndex",
+            149 => "SysStringByteLen",
+            150 => "SysAllocStringByteLen",
+            _ => "ordinal_stub",
+        }
+    } else {
+        "ordinal_stub"
     }
 }
 

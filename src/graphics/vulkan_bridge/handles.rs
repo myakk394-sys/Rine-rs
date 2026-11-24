@@ -51,11 +51,35 @@ impl WindowRegistry {
         lock.insert(hwnd, window);
     }
 
+    pub fn update_window_size(&self, hwnd: usize, width: u32, height: u32) {
+        let mut lock = self.windows.write().unwrap();
+        if let Some(win) = lock.get_mut(&hwnd) {
+            win.width = width;
+            win.height = height;
+            println!(
+                "[WINDOW REGISTRY] Updated HWND=0x{:X} size: {}x{}",
+                hwnd, width, height
+            );
+        }
+    }
+
     pub fn lookup(&self, hwnd: usize) -> Option<RineWindow> {
         let lock = self.windows.read().unwrap();
         if let Some(win) = lock.get(&hwnd) {
             return Some(win.clone());
         }
+        let hwnd_u32 = (hwnd & 0xFFFF_FFFF) as usize;
+        if hwnd_u32 != hwnd {
+            if let Some(win) = lock.get(&hwnd_u32) {
+                return Some(win.clone());
+            }
+        }
+        // Fallback: If any window was registered, pick the first/active one
+        if let Some((_, win)) = lock.iter().next() {
+            return Some(win.clone());
+        }
+        drop(lock);
+
         let global_window =
             crate::windowing::x11::GLOBAL_WINDOW.load(std::sync::atomic::Ordering::SeqCst);
         let global_display = crate::windowing::x11::GLOBAL_DISPLAY

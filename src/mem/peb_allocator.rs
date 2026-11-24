@@ -42,9 +42,9 @@ impl ProcessEnvironment {
             MmapRegion::allocate_anonymous(None, PAGE_SIZE, libc::PROT_READ | libc::PROT_WRITE)?;
         let peb_addr = peb_region.as_ptr() as u64;
 
-        // 2. Allocate TEB block (1 page = 4096 bytes)
+        // 2. Allocate TEB block (64KB = 16 pages to cover TlsSlots at 0x1480 and expansion)
         let teb_region =
-            MmapRegion::allocate_anonymous(None, PAGE_SIZE, libc::PROT_READ | libc::PROT_WRITE)?;
+            MmapRegion::allocate_anonymous(None, PAGE_SIZE * 16, libc::PROT_READ | libc::PROT_WRITE)?;
         let teb_addr = teb_region.as_ptr() as u64;
 
         // 3. Initialize Process Parameters

@@ -1,0 +1,14 @@
+# Rust build artifacts
+target
+target/
+**/*.rs.bk
+
+# Temporary logs, diffs, dumps, and scratch files
+*.log
+*.diff
+*.txt
+scratch/
+
+# Wine debug or local builds if any
+wine/
+

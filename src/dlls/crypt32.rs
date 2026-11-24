@@ -1,4 +1,7 @@
-//! Implementation of CRYPT32.DLL APIs for Godot Engine HTTPS/SSL/crypto support.
+//! Implementation of CRYPT32.DLL APIs for Godot Engine / Unity / .NET HTTPS/SSL/crypto support.
+#![allow(non_snake_case)]
+
+use std::ffi::c_void;
 
 #[no_mangle]
 pub unsafe extern "win64" fn CertOpenSystemStoreA(
@@ -24,22 +27,162 @@ pub unsafe extern "win64" fn CertOpenSystemStoreW(
 }
 
 #[no_mangle]
+pub unsafe extern "win64" fn CertOpenStore(
+    _store_provider: usize,
+    _msg_and_cert_encoding_type: u32,
+    _crypt_prov: usize,
+    _flags: u32,
+    _parameters: *const c_void,
+) -> usize {
+    println!("[CRYPT32] CertOpenStore -> 0x00010002");
+    0x00010002
+}
+
+#[no_mangle]
 pub unsafe extern "win64" fn CertCloseStore(_h_cert_store: usize, _dw_flags: u32) -> i32 {
-    println!("[CRYPT32] CertCloseStore -> TRUE");
-    1
+    1 // TRUE
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn CertFreeCertificateContext(
-    _p_cert_context: *const std::ffi::c_void,
+    _p_cert_context: *const c_void,
 ) -> i32 {
-    1
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CertFreeCertificateChain(
+    _p_chain_context: *const c_void,
+) -> i32 {
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CertVerifyCertificateChainPolicy(
+    _policy_oid: usize,
+    _p_chain_context: *const c_void,
+    _p_policy_para: *const c_void,
+    p_policy_status: *mut c_void,
+) -> i32 {
+    if !p_policy_status.is_null() {
+        // Clear dwError field in CERT_CHAIN_POLICY_STATUS (offset 4 is dwError)
+        unsafe {
+            *(p_policy_status.add(4) as *mut u32) = 0; // ERROR_SUCCESS
+        }
+    }
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CertAddEncodedCertificateToStore(
+    _h_cert_store: usize,
+    _cert_encoding_type: u32,
+    _cert_encoded: *const u8,
+    _cert_encoded_size: u32,
+    _add_disposition: u32,
+    pp_cert_context: *mut *mut c_void,
+) -> i32 {
+    if !pp_cert_context.is_null() {
+        *pp_cert_context = std::ptr::null_mut();
+    }
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CertGetCertificateChain(
+    _chain_engine: usize,
+    _cert_context: *const c_void,
+    _time: *const c_void,
+    _additional_store: usize,
+    _chain_para: *const c_void,
+    _flags: u32,
+    _reserved: *const c_void,
+    pp_chain_context: *mut *mut c_void,
+) -> i32 {
+    if !pp_chain_context.is_null() {
+        *pp_chain_context = std::ptr::null_mut();
+    }
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CertGetCertificateContextProperty(
+    _cert_context: *const c_void,
+    _prop_id: u32,
+    _data: *mut c_void,
+    pcb_data: *mut u32,
+) -> i32 {
+    if !pcb_data.is_null() {
+        *pcb_data = 0;
+    }
+    0 // FALSE
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn CertEnumCertificatesInStore(
     _h_cert_store: usize,
-    _p_prev_cert_context: *const std::ffi::c_void,
-) -> *mut std::ffi::c_void {
+    _p_prev_cert_context: *const c_void,
+) -> *mut c_void {
     std::ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CryptBinaryToStringA(
+    pb_binary: *const u8,
+    cb_binary: u32,
+    _flags: u32,
+    psz_string: *mut u8,
+    pcch_string: *mut u32,
+) -> i32 {
+    if pcch_string.is_null() {
+        return 0;
+    }
+    let req = cb_binary * 2 + 1;
+    if psz_string.is_null() {
+        *pcch_string = req;
+        return 1;
+    }
+    if *pcch_string < req {
+        *pcch_string = req;
+        return 0;
+    }
+    // Hex encode
+    let hex_chars = b"0123456789ABCDEF";
+    for i in 0..cb_binary as usize {
+        let b = *pb_binary.add(i);
+        *psz_string.add(i * 2) = hex_chars[(b >> 4) as usize];
+        *psz_string.add(i * 2 + 1) = hex_chars[(b & 0xF) as usize];
+    }
+    *psz_string.add(cb_binary as usize * 2) = 0;
+    *pcch_string = cb_binary * 2;
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CryptBinaryToStringW(
+    pb_binary: *const u8,
+    cb_binary: u32,
+    flags: u32,
+    psz_string: *mut u16,
+    pcch_string: *mut u32,
+) -> i32 {
+    let mut temp = vec![0u8; (cb_binary * 2 + 2) as usize];
+    let mut len = temp.len() as u32;
+    let ok = CryptBinaryToStringA(pb_binary, cb_binary, flags, temp.as_mut_ptr(), &mut len);
+    if ok == 0 {
+        return 0;
+    }
+    if pcch_string.is_null() {
+        return 0;
+    }
+    if psz_string.is_null() {
+        *pcch_string = len;
+        return 1;
+    }
+    let copy_len = (*pcch_string).min(len) as usize;
+    for i in 0..copy_len {
+        *psz_string.add(i) = temp[i] as u16;
+    }
+    *pcch_string = copy_len as u32;
+    1
 }

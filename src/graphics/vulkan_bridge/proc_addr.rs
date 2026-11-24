@@ -18,8 +18,8 @@ use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Mutex;
 
-/// Resolve a function from native vkGetInstanceProcAddr.
-/// For internal use only — never expose the result directly to PE64 guest code.
+/// Resolve a function from native vkGetInstanceProcAddr (internal use only).
+/// Получение адреса функции через хостовый vkGetInstanceProcAddr.
 pub unsafe fn get_native_instance_proc_addr(
     instance: NativeVkInstance,
     fn_name: &str,
@@ -120,6 +120,7 @@ fn lookup_device_thunk(name_bytes: &[u8]) -> Option<*const c_void> {
         b"vkFlushMappedMemoryRanges" => guest_vkFlushMappedMemoryRanges as *const c_void,
         b"vkInvalidateMappedMemoryRanges" => guest_vkInvalidateMappedMemoryRanges as *const c_void,
         b"vkGetDeviceMemoryCommitment" => guest_vkGetDeviceMemoryCommitment as *const c_void,
+        b"vkSetDeviceMemoryPriorityEXT" => guest_vkSetDeviceMemoryPriorityEXT as *const c_void,
 
         // Buffer / Image
         b"vkCreateBuffer" => guest_vkCreateBuffer as *const c_void,
@@ -134,10 +135,29 @@ fn lookup_device_thunk(name_bytes: &[u8]) -> Option<*const c_void> {
         b"vkGetBufferMemoryRequirements2" | b"vkGetBufferMemoryRequirements2KHR" => {
             guest_vkGetBufferMemoryRequirements2 as *const c_void
         }
+        b"vkGetDeviceBufferMemoryRequirements" | b"vkGetDeviceBufferMemoryRequirementsKHR" => {
+            guest_vkGetDeviceBufferMemoryRequirements as *const c_void
+        }
         b"vkGetImageMemoryRequirements" => guest_vkGetImageMemoryRequirements as *const c_void,
         b"vkGetImageMemoryRequirements2" | b"vkGetImageMemoryRequirements2KHR" => {
             guest_vkGetImageMemoryRequirements2 as *const c_void
         }
+        b"vkGetDeviceImageMemoryRequirements" | b"vkGetDeviceImageMemoryRequirementsKHR" => {
+            guest_vkGetDeviceImageMemoryRequirements as *const c_void
+        }
+        b"vkGetDeviceImageSparseMemoryRequirements"
+        | b"vkGetDeviceImageSparseMemoryRequirementsKHR" => {
+            guest_vkGetDeviceImageSparseMemoryRequirements as *const c_void
+        }
+        b"vkGetImageSparseMemoryRequirements" => {
+            guest_vkGetImageSparseMemoryRequirements as *const c_void
+        }
+        b"vkGetImageSparseMemoryRequirements2" | b"vkGetImageSparseMemoryRequirements2KHR" => {
+            guest_vkGetImageSparseMemoryRequirements2 as *const c_void
+        }
+        b"vkGetBufferDeviceAddress"
+        | b"vkGetBufferDeviceAddressKHR"
+        | b"vkGetBufferDeviceAddressEXT" => guest_vkGetBufferDeviceAddress as *const c_void,
         b"vkBindBufferMemory" => guest_vkBindBufferMemory as *const c_void,
         b"vkBindBufferMemory2" | b"vkBindBufferMemory2KHR" => {
             guest_vkBindBufferMemory2 as *const c_void
@@ -212,9 +232,16 @@ fn lookup_device_thunk(name_bytes: &[u8]) -> Option<*const c_void> {
         // Cmd recording
         b"vkCmdBindPipeline" => guest_vkCmdBindPipeline as *const c_void,
         b"vkCmdSetViewport" => guest_vkCmdSetViewport as *const c_void,
+        b"vkCmdSetViewportWithCount" | b"vkCmdSetViewportWithCountEXT" => {
+            guest_vkCmdSetViewportWithCount as *const c_void
+        }
         b"vkCmdSetScissor" => guest_vkCmdSetScissor as *const c_void,
+        b"vkCmdSetScissorWithCount" | b"vkCmdSetScissorWithCountEXT" => {
+            guest_vkCmdSetScissorWithCount as *const c_void
+        }
         b"vkCmdSetLineWidth" => guest_vkCmdSetLineWidth as *const c_void,
         b"vkCmdSetDepthBias" => guest_vkCmdSetDepthBias as *const c_void,
+        b"vkCmdSetDepthBias2EXT" => guest_vkCmdSetDepthBias2EXT as *const c_void,
         b"vkCmdSetBlendConstants" => guest_vkCmdSetBlendConstants as *const c_void,
         b"vkCmdSetDepthBounds" => guest_vkCmdSetDepthBounds as *const c_void,
         b"vkCmdSetStencilCompareMask" => guest_vkCmdSetStencilCompareMask as *const c_void,
@@ -222,7 +249,11 @@ fn lookup_device_thunk(name_bytes: &[u8]) -> Option<*const c_void> {
         b"vkCmdSetStencilReference" => guest_vkCmdSetStencilReference as *const c_void,
         b"vkCmdBindDescriptorSets" => guest_vkCmdBindDescriptorSets as *const c_void,
         b"vkCmdBindIndexBuffer" => guest_vkCmdBindIndexBuffer as *const c_void,
+        b"vkCmdBindIndexBuffer2KHR" => guest_vkCmdBindIndexBuffer2KHR as *const c_void,
         b"vkCmdBindVertexBuffers" => guest_vkCmdBindVertexBuffers as *const c_void,
+        b"vkCmdBindVertexBuffers2" | b"vkCmdBindVertexBuffers2EXT" => {
+            guest_vkCmdBindVertexBuffers2 as *const c_void
+        }
         b"vkCmdDraw" => guest_vkCmdDraw as *const c_void,
         b"vkCmdDrawIndexed" => guest_vkCmdDrawIndexed as *const c_void,
         b"vkCmdDrawIndirect" => guest_vkCmdDrawIndirect as *const c_void,
@@ -236,16 +267,28 @@ fn lookup_device_thunk(name_bytes: &[u8]) -> Option<*const c_void> {
         b"vkCmdDispatch" => guest_vkCmdDispatch as *const c_void,
         b"vkCmdDispatchIndirect" => guest_vkCmdDispatchIndirect as *const c_void,
         b"vkCmdCopyBuffer" => guest_vkCmdCopyBuffer as *const c_void,
+        b"vkCmdCopyBuffer2" | b"vkCmdCopyBuffer2KHR" => guest_vkCmdCopyBuffer2 as *const c_void,
         b"vkCmdCopyImage" => guest_vkCmdCopyImage as *const c_void,
+        b"vkCmdCopyImage2" | b"vkCmdCopyImage2KHR" => guest_vkCmdCopyImage2 as *const c_void,
         b"vkCmdBlitImage" => guest_vkCmdBlitImage as *const c_void,
+        b"vkCmdBlitImage2" | b"vkCmdBlitImage2KHR" => guest_vkCmdBlitImage2 as *const c_void,
         b"vkCmdCopyBufferToImage" => guest_vkCmdCopyBufferToImage as *const c_void,
+        b"vkCmdCopyBufferToImage2" | b"vkCmdCopyBufferToImage2KHR" => {
+            guest_vkCmdCopyBufferToImage2 as *const c_void
+        }
         b"vkCmdCopyImageToBuffer" => guest_vkCmdCopyImageToBuffer as *const c_void,
+        b"vkCmdCopyImageToBuffer2" | b"vkCmdCopyImageToBuffer2KHR" => {
+            guest_vkCmdCopyImageToBuffer2 as *const c_void
+        }
         b"vkCmdUpdateBuffer" => guest_vkCmdUpdateBuffer as *const c_void,
         b"vkCmdFillBuffer" => guest_vkCmdFillBuffer as *const c_void,
         b"vkCmdClearColorImage" => guest_vkCmdClearColorImage as *const c_void,
         b"vkCmdClearDepthStencilImage" => guest_vkCmdClearDepthStencilImage as *const c_void,
         b"vkCmdClearAttachments" => guest_vkCmdClearAttachments as *const c_void,
         b"vkCmdResolveImage" => guest_vkCmdResolveImage as *const c_void,
+        b"vkCmdResolveImage2" | b"vkCmdResolveImage2KHR" => {
+            guest_vkCmdResolveImage2 as *const c_void
+        }
         b"vkCmdBeginRenderPass" => guest_vkCmdBeginRenderPass as *const c_void,
         b"vkCmdNextSubpass" => guest_vkCmdNextSubpass as *const c_void,
         b"vkCmdEndRenderPass" => guest_vkCmdEndRenderPass as *const c_void,
@@ -256,6 +299,10 @@ fn lookup_device_thunk(name_bytes: &[u8]) -> Option<*const c_void> {
         b"vkCmdEndRenderPass2" | b"vkCmdEndRenderPass2KHR" => {
             guest_vkCmdEndRenderPass2 as *const c_void
         }
+        b"vkCmdBeginRendering" | b"vkCmdBeginRenderingKHR" => {
+            guest_vkCmdBeginRendering as *const c_void
+        }
+        b"vkCmdEndRendering" | b"vkCmdEndRenderingKHR" => guest_vkCmdEndRendering as *const c_void,
         b"vkCmdPipelineBarrier" => guest_vkCmdPipelineBarrier as *const c_void,
         b"vkCmdPipelineBarrier2" | b"vkCmdPipelineBarrier2KHR" => {
             guest_vkCmdPipelineBarrier2 as *const c_void
@@ -266,10 +313,16 @@ fn lookup_device_thunk(name_bytes: &[u8]) -> Option<*const c_void> {
         b"vkCmdEndQuery" => guest_vkCmdEndQuery as *const c_void,
         b"vkCmdResetQueryPool" => guest_vkCmdResetQueryPool as *const c_void,
         b"vkCmdWriteTimestamp" => guest_vkCmdWriteTimestamp as *const c_void,
+        b"vkCmdWriteTimestamp2" | b"vkCmdWriteTimestamp2KHR" => {
+            guest_vkCmdWriteTimestamp2 as *const c_void
+        }
         b"vkCmdCopyQueryPoolResults" => guest_vkCmdCopyQueryPoolResults as *const c_void,
         b"vkCmdSetEvent" => guest_vkCmdSetEvent as *const c_void,
+        b"vkCmdSetEvent2" | b"vkCmdSetEvent2KHR" => guest_vkCmdSetEvent2 as *const c_void,
         b"vkCmdResetEvent" => guest_vkCmdResetEvent as *const c_void,
+        b"vkCmdResetEvent2" | b"vkCmdResetEvent2KHR" => guest_vkCmdResetEvent2 as *const c_void,
         b"vkCmdWaitEvents" => guest_vkCmdWaitEvents as *const c_void,
+        b"vkCmdWaitEvents2" | b"vkCmdWaitEvents2KHR" => guest_vkCmdWaitEvents2 as *const c_void,
 
         // DXVK Extended Dynamic State
         b"vkCmdSetCullMode" | b"vkCmdSetCullModeEXT" => guest_vkCmdSetCullMode as *const c_void,
@@ -333,6 +386,33 @@ fn lookup_device_thunk(name_bytes: &[u8]) -> Option<*const c_void> {
         b"vkQueueInsertDebugUtilsLabelEXT" => {
             guest_vkQueueInsertDebugUtilsLabelEXT as *const c_void
         }
+        b"vkGetRenderingAreaGranularityKHR" => guest_vkGetRenderingAreaGranularityKHR as *const c_void,
+        b"vkGetDeviceImageSubresourceLayoutKHR" => guest_vkGetDeviceImageSubresourceLayoutKHR as *const c_void,
+        b"vkGetImageSubresourceLayout2KHR" => guest_vkGetImageSubresourceLayout2KHR as *const c_void,
+        b"vkCmdSetSampleLocationsEXT" => guest_vkCmdSetSampleLocationsEXT as *const c_void,
+        b"vkGetCalibratedTimestampsKHR" => guest_vkGetCalibratedTimestampsKHR as *const c_void,
+
+        // Maintenance6, Present Wait & Descriptor Buffers
+        b"vkCmdBindDescriptorSets2" | b"vkCmdBindDescriptorSets2KHR" => {
+            guest_vkCmdBindDescriptorSets2KHR as *const c_void
+        }
+        b"vkCmdPushConstants2" | b"vkCmdPushConstants2KHR" => {
+            guest_vkCmdPushConstants2KHR as *const c_void
+        }
+        b"vkCmdPushDescriptorSet2" | b"vkCmdPushDescriptorSet2KHR" => {
+            guest_vkCmdPushDescriptorSet2KHR as *const c_void
+        }
+        b"vkCmdPushDescriptorSetWithTemplate2" | b"vkCmdPushDescriptorSetWithTemplate2KHR" => {
+            guest_vkCmdPushDescriptorSetWithTemplate2KHR as *const c_void
+        }
+        b"vkCmdSetDescriptorBufferOffsets2EXT" => {
+            guest_vkCmdSetDescriptorBufferOffsets2EXT as *const c_void
+        }
+        b"vkCmdBindDescriptorBufferEmbeddedSamplers2EXT" => {
+            guest_vkCmdBindDescriptorBufferEmbeddedSamplers2EXT as *const c_void
+        }
+        b"vkWaitForPresentKHR" => guest_vkWaitForPresentKHR as *const c_void,
+        b"vkWaitForPresent2KHR" => guest_vkWaitForPresent2KHR as *const c_void,
 
         _ => return None,
     };

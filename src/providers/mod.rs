@@ -59,12 +59,25 @@ impl RineApiResolver {
             crate::pe::imports::IatSymbolResolver::resolve_symbol(dll_name, symbol_name)
         {
             record_native_call(dll_name, symbol_name);
-            println!(
-                "[RINE PROVIDER RESOLUTION]\ndll={}\nsymbol={}\nrine_available=true\nwine_available=false\nselected=rine",
-                dll_name, symbol_name
-            );
             return Some(ResolvedApi {
                 address: addr as u64,
+                provider: ApiProviderKind::NativeRine,
+                module: dll_name.to_string(),
+                symbol: symbol_name.to_string(),
+            });
+        }
+
+        // Priority 1.5: Application Companion PE DLL (e.g. UnityPlayer.dll, GameAssembly.dll)
+        if let Some(comp_addr) =
+            crate::mem::loader::LoadedModule::lookup_companion_export(dll_name, symbol_name)
+        {
+            record_native_call(dll_name, symbol_name);
+            println!(
+                "[RINE COMPANION RESOLUTION] dll='{}' symbol='{}' address=0x{:016X}",
+                dll_name, symbol_name, comp_addr
+            );
+            return Some(ResolvedApi {
+                address: comp_addr as u64,
                 provider: ApiProviderKind::NativeRine,
                 module: dll_name.to_string(),
                 symbol: symbol_name.to_string(),
@@ -76,10 +89,6 @@ impl RineApiResolver {
         if config.enabled {
             if let Some(wine_addr) = resolve_wine_export(&config, dll_name, symbol_name) {
                 record_wine_call(dll_name, symbol_name);
-                println!(
-                    "[RINE PROVIDER RESOLUTION]\ndll={}\nsymbol={}\nrine_available=false\nwine_available=true\nselected=wine",
-                    dll_name, symbol_name
-                );
                 return Some(ResolvedApi {
                     address: wine_addr as u64,
                     provider: ApiProviderKind::WineAdapter,
@@ -95,12 +104,15 @@ impl RineApiResolver {
     }
 }
 
+pub static STATS_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn provider_prefers_native_rine() {
+        let _guard = STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         set_global_wine_config(WineConfig {
             enabled: true,
             dll_path: find_wine_dll_dir(),
@@ -116,7 +128,7 @@ mod tests {
 
     #[test]
     fn provider_uses_wine_when_native_missing() {
-        let _guard = STATS_TEST_MUTEX.lock().unwrap();
+        let _guard = STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let wine_dir = match find_wine_dll_dir() {
             Some(d) => d,
             None => {
@@ -140,7 +152,7 @@ mod tests {
 
     #[test]
     fn provider_fails_when_both_missing() {
-        let _guard = STATS_TEST_MUTEX.lock().unwrap();
+        let _guard = STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         set_global_wine_config(WineConfig {
             enabled: true,
             dll_path: find_wine_dll_dir(),
@@ -154,29 +166,29 @@ mod tests {
 
     #[test]
     fn wine_provider_disabled_by_default() {
-        let _guard = STATS_TEST_MUTEX.lock().unwrap();
+        let _guard = STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         set_global_wine_config(WineConfig {
             enabled: false,
             dll_path: find_wine_dll_dir(),
-            allowed_modules: vec!["version.dll".into()],
+            allowed_modules: vec!["wine_unimplemented.dll".into()],
             allowed_symbols: Vec::new(),
         });
 
-        let res = RineApiResolver::resolve_symbol("version.dll", "GetFileVersionInfoW");
+        let res = RineApiResolver::resolve_symbol("wine_unimplemented.dll", "WineOnlySymbol");
         assert!(res.is_none());
     }
 
     #[test]
     fn wine_provider_allowlist_enforced() {
-        let _guard = STATS_TEST_MUTEX.lock().unwrap();
+        let _guard = STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         set_global_wine_config(WineConfig {
             enabled: true,
             dll_path: find_wine_dll_dir(),
-            allowed_modules: vec!["avrt.dll".into()],
+            allowed_modules: vec!["other.dll".into()],
             allowed_symbols: Vec::new(),
         });
 
-        let res = RineApiResolver::resolve_symbol("version.dll", "GetFileVersionInfoW");
+        let res = RineApiResolver::resolve_symbol("wine_unimplemented.dll", "WineOnlySymbol");
         assert!(res.is_none());
     }
 
@@ -265,11 +277,9 @@ mod tests {
         handle.join().unwrap();
     }
 
-    static STATS_TEST_MUTEX: Mutex<()> = Mutex::new(());
-
     #[test]
     fn provider_stats_counts_native_calls() {
-        let _guard = STATS_TEST_MUTEX.lock().unwrap();
+        let _guard = STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         reset_stats();
         record_native_call("kernel32.dll", "TestNativeSym");
         let (n_calls, n_syms, _, _, _, _) = get_stats();
@@ -279,7 +289,7 @@ mod tests {
 
     #[test]
     fn provider_stats_counts_wine_calls() {
-        let _guard = STATS_TEST_MUTEX.lock().unwrap();
+        let _guard = STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         reset_stats();
         record_wine_call("version.dll", "TestWineSym");
         let (_, _, w_calls, w_syms, _, _) = get_stats();
@@ -289,7 +299,7 @@ mod tests {
 
     #[test]
     fn provider_stats_counts_unresolved() {
-        let _guard = STATS_TEST_MUTEX.lock().unwrap();
+        let _guard = STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         reset_stats();
         record_unresolved_call("unknown.dll", "TestUnresolvedSym");
         let (_, _, _, _, u_calls, u_syms) = get_stats();

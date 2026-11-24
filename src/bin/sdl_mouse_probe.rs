@@ -1,7 +1,8 @@
 use std::ffi::{c_char, c_int, c_void, CString};
 
 type SdlInitFn = unsafe extern "C" fn(u32) -> c_int;
-type SdlCreateWindowFn = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int, c_int, u32) -> *mut c_void;
+type SdlCreateWindowFn =
+    unsafe extern "C" fn(*const c_char, c_int, c_int, c_int, c_int, u32) -> *mut c_void;
 type SdlDestroyWindowFn = unsafe extern "C" fn(*mut c_void);
 type SdlPollEventFn = unsafe extern "C" fn(*mut u8) -> c_int;
 type SdlEventStateFn = unsafe extern "C" fn(u32, c_int) -> u8;
@@ -17,29 +18,68 @@ fn main() {
     println!("STANDALONE SDL PHYSICAL MOUSE INPUT PROBE");
     println!("============================================================");
 
-    let sdl_lib = unsafe { libc::dlopen(b"libSDL2-2.0.so.0\0".as_ptr() as *const c_char, libc::RTLD_NOW) };
+    let sdl_lib = unsafe {
+        libc::dlopen(
+            b"libSDL2-2.0.so.0\0".as_ptr() as *const c_char,
+            libc::RTLD_NOW,
+        )
+    };
     if sdl_lib.is_null() {
         eprintln!("[PROBE ERROR] Failed to load libSDL2-2.0.so.0");
         return;
     }
 
     unsafe {
-        let fn_init: SdlInitFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_Init\0".as_ptr() as *const c_char));
-        let fn_create_window: SdlCreateWindowFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_CreateWindow\0".as_ptr() as *const c_char));
-        let fn_destroy_window: SdlDestroyWindowFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_DestroyWindow\0".as_ptr() as *const c_char));
-        let fn_poll_event: SdlPollEventFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_PollEvent\0".as_ptr() as *const c_char));
-        let fn_event_state: SdlEventStateFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_EventState\0".as_ptr() as *const c_char));
-        let fn_get_mouse_state: SdlGetMouseStateFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_GetMouseState\0".as_ptr() as *const c_char));
-        let sym_global_mouse = libc::dlsym(sdl_lib, b"SDL_GetGlobalMouseState\0".as_ptr() as *const c_char);
-        let fn_get_global_mouse_state: Option<SdlGetGlobalMouseStateFn> = if !sym_global_mouse.is_null() {
-            Some(std::mem::transmute(sym_global_mouse))
-        } else {
-            None
-        };
-        let fn_get_mouse_focus: SdlGetMouseFocusFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_GetMouseFocus\0".as_ptr() as *const c_char));
-        let fn_get_keyboard_focus: SdlGetKeyboardFocusFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_GetKeyboardFocus\0".as_ptr() as *const c_char));
-        let fn_get_window_id: SdlGetWindowIdFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_GetWindowID\0".as_ptr() as *const c_char));
-        let fn_get_ticks: SdlGetTicksFn = std::mem::transmute(libc::dlsym(sdl_lib, b"SDL_GetTicks\0".as_ptr() as *const c_char));
+        let fn_init: SdlInitFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_Init\0".as_ptr() as *const c_char,
+        ));
+        let fn_create_window: SdlCreateWindowFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_CreateWindow\0".as_ptr() as *const c_char,
+        ));
+        let fn_destroy_window: SdlDestroyWindowFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_DestroyWindow\0".as_ptr() as *const c_char,
+        ));
+        let fn_poll_event: SdlPollEventFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_PollEvent\0".as_ptr() as *const c_char,
+        ));
+        let fn_event_state: SdlEventStateFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_EventState\0".as_ptr() as *const c_char,
+        ));
+        let fn_get_mouse_state: SdlGetMouseStateFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_GetMouseState\0".as_ptr() as *const c_char,
+        ));
+        let sym_global_mouse = libc::dlsym(
+            sdl_lib,
+            b"SDL_GetGlobalMouseState\0".as_ptr() as *const c_char,
+        );
+        let fn_get_global_mouse_state: Option<SdlGetGlobalMouseStateFn> =
+            if !sym_global_mouse.is_null() {
+                Some(std::mem::transmute(sym_global_mouse))
+            } else {
+                None
+            };
+        let fn_get_mouse_focus: SdlGetMouseFocusFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_GetMouseFocus\0".as_ptr() as *const c_char,
+        ));
+        let fn_get_keyboard_focus: SdlGetKeyboardFocusFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_GetKeyboardFocus\0".as_ptr() as *const c_char,
+        ));
+        let fn_get_window_id: SdlGetWindowIdFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_GetWindowID\0".as_ptr() as *const c_char,
+        ));
+        let fn_get_ticks: SdlGetTicksFn = std::mem::transmute(libc::dlsym(
+            sdl_lib,
+            b"SDL_GetTicks\0".as_ptr() as *const c_char,
+        ));
 
         // 1. Initialize SDL2
         let init_res = fn_init(0x00000020 /* SDL_INIT_VIDEO */);
@@ -53,10 +93,38 @@ fn main() {
 
         println!("------------------------------------------------------------");
         println!("SDL EVENT STATES (SDL_QUERY):");
-        println!("  SDL_MOUSEMOTION     (0x400): {}", if state_motion == 1 { "SDL_ENABLE (1)" } else { "SDL_DISABLE (0)" });
-        println!("  SDL_MOUSEBUTTONDOWN (0x401): {}", if state_down == 1 { "SDL_ENABLE (1)" } else { "SDL_DISABLE (0)" });
-        println!("  SDL_MOUSEBUTTONUP   (0x402): {}", if state_up == 1 { "SDL_ENABLE (1)" } else { "SDL_DISABLE (0)" });
-        println!("  SDL_MOUSEWHEEL      (0x403): {}", if state_wheel == 1 { "SDL_ENABLE (1)" } else { "SDL_DISABLE (0)" });
+        println!(
+            "  SDL_MOUSEMOTION     (0x400): {}",
+            if state_motion == 1 {
+                "SDL_ENABLE (1)"
+            } else {
+                "SDL_DISABLE (0)"
+            }
+        );
+        println!(
+            "  SDL_MOUSEBUTTONDOWN (0x401): {}",
+            if state_down == 1 {
+                "SDL_ENABLE (1)"
+            } else {
+                "SDL_DISABLE (0)"
+            }
+        );
+        println!(
+            "  SDL_MOUSEBUTTONUP   (0x402): {}",
+            if state_up == 1 {
+                "SDL_ENABLE (1)"
+            } else {
+                "SDL_DISABLE (0)"
+            }
+        );
+        println!(
+            "  SDL_MOUSEWHEEL      (0x403): {}",
+            if state_wheel == 1 {
+                "SDL_ENABLE (1)"
+            } else {
+                "SDL_DISABLE (0)"
+            }
+        );
         println!("------------------------------------------------------------");
 
         // 3. Create window
@@ -89,9 +157,12 @@ fn main() {
         while fn_get_ticks().wrapping_sub(start_ticks) < 60000 {
             while fn_poll_event(sdl_event.as_mut_ptr()) != 0 {
                 event_count += 1;
-                let event_type = u32::from_le_bytes([sdl_event[0], sdl_event[1], sdl_event[2], sdl_event[3]]);
-                let timestamp = u32::from_le_bytes([sdl_event[4], sdl_event[5], sdl_event[6], sdl_event[7]]);
-                let event_win_id = u32::from_le_bytes([sdl_event[8], sdl_event[9], sdl_event[10], sdl_event[11]]);
+                let event_type =
+                    u32::from_le_bytes([sdl_event[0], sdl_event[1], sdl_event[2], sdl_event[3]]);
+                let timestamp =
+                    u32::from_le_bytes([sdl_event[4], sdl_event[5], sdl_event[6], sdl_event[7]]);
+                let event_win_id =
+                    u32::from_le_bytes([sdl_event[8], sdl_event[9], sdl_event[10], sdl_event[11]]);
 
                 match event_type {
                     0x400 => {
@@ -138,7 +209,9 @@ fn main() {
                         let sym = i32::from_le_bytes(sdl_event[20..24].try_into().unwrap());
                         println!(
                             "[PROBE EVENT #{} | +{}ms] SDL_KEYDOWN: sym=0x{:X}",
-                            event_count, timestamp.wrapping_sub(start_ticks), sym
+                            event_count,
+                            timestamp.wrapping_sub(start_ticks),
+                            sym
                         );
                         if sym == 27 || sym == b'q' as i32 || sym == b'Q' as i32 {
                             println!("[PROBE] Exit key pressed.");
@@ -154,7 +227,10 @@ fn main() {
                         if event_count <= 10 {
                             println!(
                                 "[PROBE EVENT #{} | +{}ms] Raw Event type=0x{:04X}, winID={}",
-                                event_count, timestamp.wrapping_sub(start_ticks), event_type, event_win_id
+                                event_count,
+                                timestamp.wrapping_sub(start_ticks),
+                                event_type,
+                                event_win_id
                             );
                         }
                     }

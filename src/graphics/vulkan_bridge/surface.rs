@@ -5,6 +5,9 @@ use super::loader::get_native_proc_addr;
 use super::types::*;
 use std::ffi::c_void;
 
+pub static LAST_SURFACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[no_mangle]
 pub unsafe extern "win64" fn rine_vkCreateWin32SurfaceKHR(
     instance: NativeVkInstance,
     p_create_info: *const VkWin32SurfaceCreateInfoKHR,
@@ -20,31 +23,50 @@ pub unsafe extern "win64" fn rine_vkCreateWin32SurfaceKHR(
     let info = &*p_create_info;
     let hwnd = info.hwnd;
 
-    let rine_win = match WindowRegistry::global().lookup(hwnd) {
-        Some(w) => w,
+    let (mut dpy, mut win, mut visual_id) = match WindowRegistry::global().lookup(hwnd) {
+        Some(w) => {
+            println!(
+                "[VULKAN BRIDGE] Resolved HWND=0x{:X} -> Native Display={:p}, Window=0x{:X}, VisualID=0x{:X}",
+                hwnd, w.native_display, w.native_window, w.native_visual_id
+            );
+            (w.native_display, w.native_window, w.native_visual_id)
+        }
         None => {
             println!(
-                "[VULKAN BRIDGE] ERROR: No registered RineWindow found for HWND=0x{:X}",
+                "[VULKAN BRIDGE] HWND=0x{:X} not directly registered, activating fallback path",
                 hwnd
             );
-            return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
+            (std::ptr::null_mut(), 0u64, 0u64)
         }
     };
 
-    println!(
-        "[VULKAN BRIDGE] Resolved HWND=0x{:X} -> Native Display={:p}, Window=0x{:X}, VisualID=0x{:X}",
-        hwnd, rine_win.native_display, rine_win.native_window, rine_win.native_visual_id
-    );
-
-    let mut dpy = rine_win.native_display;
-    let mut win = rine_win.native_window;
-
+    if win == 0 {
+        let global_win = crate::windowing::x11::GLOBAL_WINDOW.load(std::sync::atomic::Ordering::SeqCst);
+        if global_win != 0 {
+            win = global_win;
+        }
+    }
     if dpy.is_null() {
+        let global_dpy = crate::windowing::x11::GLOBAL_DISPLAY.load(std::sync::atomic::Ordering::SeqCst)
+            as *mut c_void;
+        if !global_dpy.is_null() {
+            dpy = global_dpy;
+        }
+    }
+    if visual_id == 0 {
+        visual_id = crate::windowing::x11::get_global_visual_id();
+    }
+
+    if dpy.is_null() || win == 0 {
         crate::windowing::x11::ensure_x11_environment();
-        dpy = crate::windowing::x11::XOpenDisplay(std::ptr::null());
-        if !dpy.is_null() {
-            crate::windowing::x11::GLOBAL_DISPLAY
-                .store(dpy as u64, std::sync::atomic::Ordering::SeqCst);
+        if dpy.is_null() {
+            dpy = crate::windowing::x11::XOpenDisplay(std::ptr::null());
+            if !dpy.is_null() {
+                crate::windowing::x11::GLOBAL_DISPLAY
+                    .store(dpy as u64, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        if !dpy.is_null() && win == 0 {
             let screen = crate::windowing::x11::XDefaultScreen(dpy);
             let root = crate::windowing::x11::XRootWindow(dpy, screen);
             win = crate::windowing::x11::XCreateSimpleWindow(dpy, root, 0, 0, 1920, 1080, 0, 0, 0);
@@ -55,6 +77,45 @@ pub unsafe extern "win64" fn rine_vkCreateWin32SurfaceKHR(
                 dpy, win
             );
         }
+    }
+
+    if dpy.is_null() || win == 0 {
+        println!(
+            "[VULKAN BRIDGE] ERROR: Unable to resolve or create native X11 window/display for HWND=0x{:X}",
+            hwnd
+        );
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    // Auto-register in WindowRegistry so future lookups succeed immediately
+    WindowRegistry::global().register_window(
+        hwnd,
+        super::handles::RineWindow {
+            guest_hwnd: hwnd,
+            backend: super::handles::WindowBackendType::X11,
+            native_display: dpy,
+            native_window: win,
+            native_visual_id: visual_id,
+            width: 1920,
+            height: 1080,
+            visible: true,
+        },
+    );
+    let hwnd_u32 = (hwnd & 0xFFFF_FFFF) as usize;
+    if hwnd_u32 != hwnd && hwnd_u32 != 0 {
+        WindowRegistry::global().register_window(
+            hwnd_u32,
+            super::handles::RineWindow {
+                guest_hwnd: hwnd_u32,
+                backend: super::handles::WindowBackendType::X11,
+                native_display: dpy,
+                native_window: win,
+                native_visual_id: visual_id,
+                width: 1920,
+                height: 1080,
+                visible: true,
+            },
+        );
     }
 
     let xlib_create_info = VkXlibSurfaceCreateInfoKHR {
@@ -97,6 +158,16 @@ pub unsafe extern "win64" fn rine_vkCreateWin32SurfaceKHR(
         "[VULKAN BRIDGE] Created Native X11 Vulkan Surface=0x{:X} -> VkResult={}",
         *p_surface, res
     );
+    if res == 0 && !p_surface.is_null() {
+        LAST_SURFACE.store(*p_surface, std::sync::atomic::Ordering::SeqCst);
+        let s = *p_surface;
+        for i in 0..24 {
+            let val = *((s + i * 8) as *const u64);
+            println!("  [SURFACE MEM] +0x{:02X}: 0x{:016X}", i * 8, val);
+        }
+    }
+    use std::io::Write;
+    std::io::stdout().flush().ok();
     res
 }
 

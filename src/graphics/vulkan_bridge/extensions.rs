@@ -121,6 +121,20 @@ pub unsafe extern "win64" fn rine_vkCreateInstance(
     }
 
     let info = &*p_create_info;
+    if !info.pApplicationInfo.is_null() {
+        let app_info = &*(info.pApplicationInfo as *const VkApplicationInfo);
+        println!(
+            "[VULKAN BRIDGE] pApplicationInfo: apiVersion={}.{}.{}, appName={:p}, engineName={:p}",
+            (app_info.apiVersion >> 22) & 0x7F,
+            (app_info.apiVersion >> 12) & 0x3FF,
+            app_info.apiVersion & 0xFFF,
+            app_info.pApplicationName,
+            app_info.pEngineName,
+        );
+    } else {
+        println!("[VULKAN BRIDGE] pApplicationInfo is NULL!");
+    }
+    println!("[VULKAN BRIDGE] vkCreateInstance pNext: {:p}", info.pNext);
     let mut transformed_exts: Vec<CString> = Vec::new();
     let mut has_khr_surface = false;
     let mut has_xlib_surface = false;
@@ -195,6 +209,9 @@ pub unsafe extern "win64" fn rine_vkCreateInstance(
 
     // Log extension mapping for diagnostics
     if res == VK_SUCCESS {
+        if !p_instance.is_null() && !(*p_instance).is_null() {
+            super::loader::set_native_instance(*p_instance as usize);
+        }
         println!(
             "[VULKAN BRIDGE] vkCreateInstance SUCCESS with {} extensions (Instance={:p})",
             ext_ptrs.len(),

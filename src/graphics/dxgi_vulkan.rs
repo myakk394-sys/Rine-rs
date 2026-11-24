@@ -4,7 +4,8 @@ use std::ffi::{c_void, CString};
 pub type Display = *mut c_void;
 pub type Window = u64;
 
-/// Vulkan 1.3 / DXVK Retranslator Engine — loads libvulkan.so.1 and libpulse-simple.so.0
+/// Vulkan 1.3 and DXVK bridge engine (loads libvulkan.so.1 and libpulse-simple.so.0).
+/// Движок моста Vulkan 1.3 и DXVK (загружает библиотеки libvulkan.so.1 и libpulse-simple.so.0).
 pub struct VulkanDxvkEngine {
     pub vulkan_handle: *mut c_void,
     pub pulse_handle: *mut c_void,
@@ -40,8 +41,17 @@ impl VulkanDxvkEngine {
 static VULKAN_PRESENTATION_CONFIRMED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+pub fn is_vulkan_presentation_confirmed() -> bool {
+    VULKAN_PRESENTATION_CONFIRMED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn set_vulkan_presentation_confirmed() {
-    VULKAN_PRESENTATION_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let was = VULKAN_PRESENTATION_CONFIRMED.swap(true, std::sync::atomic::Ordering::SeqCst);
+    if !was {
+        unsafe {
+            crate::windowing::x11::show_and_unhide_game_window();
+        }
+    }
 }
 
 pub struct VulkanSwapChainPresenter;
@@ -94,5 +104,7 @@ impl VulkanSwapChainPresenter {
         set_color(renderer, 0x1A, 0x1A, 0x2E, 0xFF);
         render_clear(renderer);
         render_present(renderer);
+        crate::sys::diagnostics::record_gfx_api("SDL_RenderPresent");
+        crate::sys::diagnostics::notify_frame_presented();
     }
 }

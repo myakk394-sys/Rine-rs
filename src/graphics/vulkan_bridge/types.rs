@@ -45,6 +45,17 @@ pub struct VkXlibSurfaceCreateInfoKHR {
 }
 
 #[repr(C)]
+pub struct VkApplicationInfo {
+    pub sType: i32,
+    pub pNext: *const std::ffi::c_void,
+    pub pApplicationName: *const c_char,
+    pub applicationVersion: u32,
+    pub pEngineName: *const c_char,
+    pub engineVersion: u32,
+    pub apiVersion: u32,
+}
+
+#[repr(C)]
 pub struct VkInstanceCreateInfo {
     pub sType: i32,
     pub pNext: *const std::ffi::c_void,

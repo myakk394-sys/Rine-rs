@@ -3,6 +3,7 @@ pub mod imports;
 pub mod parser;
 pub mod peb;
 pub mod section;
+pub mod steamstub;
 pub mod teb;
 
 pub use headers::*;
@@ -10,4 +11,5 @@ pub use imports::*;
 pub use parser::PeImage;
 pub use peb::*;
 pub use section::*;
+pub use steamstub::*;
 pub use teb::*;

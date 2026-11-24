@@ -12,6 +12,9 @@ pub fn set_thread_teb_gs_base(teb_address: u64) -> Result<()> {
             unsafe { *libc::__errno_location() }
         )));
     }
+    crate::dlls::kernel32::CACHED_TEB_PTR.with(|c| {
+        c.set(teb_address as *mut crate::pe::teb::Teb64);
+    });
     Ok(())
 }
 
@@ -25,6 +28,30 @@ pub unsafe extern "win64" fn rine_exit_thread_stub(exit_code: u64) -> ! {
     crate::dlls::user32::run_main_window_event_loop();
 
     std::process::exit((exit_code & 0xFFFFFFFF) as i32);
+}
+
+pub fn get_current_thread_stack_bounds() -> (u64, u64) {
+    unsafe {
+        let mut stackaddr: *mut libc::c_void = std::ptr::null_mut();
+        let mut stacksize: usize = 0;
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
+            libc::pthread_attr_getstack(&attr, &mut stackaddr, &mut stacksize);
+            let mut guardsize: usize = 0;
+            libc::pthread_attr_getguardsize(&attr, &mut guardsize);
+            libc::pthread_attr_destroy(&mut attr);
+            let limit = (stackaddr as u64) + (guardsize as u64);
+            let base = (stackaddr as u64) + (stacksize as u64);
+            println!(
+                "[STACK BOUNDS] stackaddr={:p} stacksize=0x{:X} guardsize=0x{:X} => limit=0x{:X} base=0x{:X}",
+                stackaddr, stacksize, guardsize, limit, base
+            );
+            return (limit, base);
+        }
+        let rsp: u64;
+        std::arch::asm!("mov {}, rsp", out(reg) rsp);
+        (rsp.saturating_sub(0x10000), rsp + 0x1000)
+    }
 }
 
 #[no_mangle]
@@ -56,6 +83,17 @@ pub unsafe extern "C" fn jump_to_win64_entry_point(
     println!("[RINE EXEC] GS Base status: {:?}", res);
     let _ = std::io::stdout().flush();
 
+    // Initialize main thread TLS slots for all loaded PE modules
+    let p_teb = teb_address as *mut crate::pe::teb::Teb64;
+    if !p_teb.is_null() {
+        let tls_array_addr = (*p_teb).thread_local_storage_pointer;
+        crate::mem::loader::init_thread_tls(tls_array_addr);
+        println!(
+            "[RINE EXEC] Initialized main thread TLS slots @ 0x{:016X}",
+            tls_array_addr
+        );
+    }
+
     let peb_ptr = peb_address as *const u64;
     let image_base = if !peb_ptr.is_null() {
         unsafe { *peb_ptr.add(2) } // Offset 0x10 in PEB is ImageBaseAddress
@@ -63,14 +101,15 @@ pub unsafe extern "C" fn jump_to_win64_entry_point(
         0x0000000140000000
     };
 
-    // Populate TEB StackBase (gs:[0x08]) and StackLimit (gs:[0x10]) with thread stack range
+    // Populate TEB StackBase (gs:[0x08]) and StackLimit (gs:[0x10]) with real thread stack range
+    let (real_stack_limit, real_stack_base) = get_current_thread_stack_bounds();
     let current_rsp: u64;
     std::arch::asm!("mov {}, rsp", out(reg) current_rsp);
 
     let stack_base_ptr = (teb_address + 0x08) as *mut u64;
     let stack_limit_ptr = (teb_address + 0x10) as *mut u64;
-    *stack_base_ptr = current_rsp + 0x100000;
-    *stack_limit_ptr = current_rsp.saturating_sub(0x100000);
+    *stack_base_ptr = real_stack_base;
+    *stack_limit_ptr = real_stack_limit;
 
     let exit_stub_ptr = rine_exit_thread_stub as *const () as u64;
     let safe_buf = crate::dlls::registry::get_dummy_stub_buffer_ptr() as u64;

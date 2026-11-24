@@ -305,6 +305,11 @@ pub fn acquire_next_image(handle: u64, semaphore: u64, fence: u64, p_image_index
 
 pub fn present_swapchain_image(_queue: NativeVkDevice, handle: u64, _image_index: u32) -> i32 {
     let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+    if frame_num == 1 {
+        unsafe {
+            crate::windowing::x11::show_and_unhide_game_window();
+        }
+    }
     let guard = swapchains();
     if let Some(ref map) = *guard {
         if let Some(data) = map.get(&handle) {
@@ -314,10 +319,10 @@ pub fn present_swapchain_image(_queue: NativeVkDevice, handle: u64, _image_index
                     crate::windowing::x11::XFlush(dpy);
                 }
             }
-            if frame_num <= 10 || frame_num % 60 == 0 {
+            if frame_num == 1 {
                 println!(
-                    "[RINE FRAME PRESENTED] Frame #{} successfully presented on desktop window ({}x{})!",
-                    frame_num, data.width, data.height
+                    "[RINE FRAME PRESENTED] First frame successfully presented on desktop window ({}x{})!",
+                    data.width, data.height
                 );
             }
             return VK_SUCCESS;

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rine - Win64 Translation Engine Launcher</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="logo-icon">R</div>
+                <div class="brand-text">
+                    <h1>RINE</h1>
+                    <span>Win64 Kernel Layer</span>
+                </div>
+            </div>
+
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                    <span>Запуск приложения</span>
+                </a>
+                <a href="#" class="nav-item">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                    <span>Монитор памяти</span>
+                </a>
+                <a href="#" class="nav-item">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+                    <span>Параметры ядра</span>
+                </a>
+            </nav>
+
+            <div class="system-badge">
+                <div class="status-indicator"></div>
+                <div class="system-info">
+                    <span class="sys-title">Linux x86_64 Core</span>
+                    <span class="sys-version">AGPLv3 • Pure Rust</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="top-header">
+                <div class="header-title">
+                    <h2>Панель управления запуском Rine</h2>
+                    <p>Выберите исполняемый файл Windows и режим буферизации памяти</p>
+                </div>
+                <div class="header-status">
+                    <span class="badge badge-ram">RAM Disk: Доступен</span>
+                    <span class="badge badge-wine">Wine Ref: ./wine/</span>
+                </div>
+            </header>
+
+            <div class="dashboard-grid">
+                <!-- Left Control Column -->
+                <div class="control-card">
+                    <div class="card-header">
+                        <h3>1. Выбор Исполняемого Файла (.exe)</h3>
+                    </div>
+                    
+                    <div class="file-dropzone" id="dropzone">
+                        <input type="file" id="fileInput" accept=".exe,.dll" hidden>
+                        <div class="dropzone-content" id="dropzoneContent">
+                            <div class="drop-icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                            </div>
+                            <h4>Перетащите .exe файл сюда</h4>
+                            <p>или нажмите для выбора файла</p>
+                            <button class="btn btn-secondary" onclick="document.getElementById('fileInput').click()">Обзор файлов</button>
+                        </div>
+                        <div class="file-selected-info hidden" id="fileSelectedInfo">
+                            <div class="file-icon">EXE</div>
+                            <div class="file-details">
+                                <span class="file-name" id="fileName">game.exe</span>
+                                <span class="file-size" id="fileSize">64.2 MB • PE32+ (Win64)</span>
+                            </div>
+                            <button class="btn-clear" id="btnClearFile">✕</button>
+                        </div>
+                    </div>
+
+                    <div class="card-header margin-top">
+                        <h3>2. Режим буферизации памяти (Storage Strategy)</h3>
+                    </div>
+
+                    <!-- Radio Cards Selection -->
+                    <div class="radio-options-grid">
+                        <label class="radio-card active" id="cardRam">
+                            <input type="radio" name="storageStrategy" value="ram" checked>
+                            <div class="radio-custom">
+                                <div class="radio-circle"></div>
+                            </div>
+                            <div class="radio-info">
+                                <div class="radio-title-row">
+                                    <span class="radio-title">ОЗУ / RAM Mode (Zero I/O)</span>
+                                    <span class="pill pill-fast">Максимальная скорость</span>
+                                </div>
+                                <p class="radio-desc">Файл полностью предзагружается в RAM (`memfd_create`/`tmpfs`). Убирает задержки диска при компиляции шейдеров и выгрузке текстур.</p>
+                            </div>
+                        </label>
+
+                        <label class="radio-card" id="cardSsd">
+                            <input type="radio" name="storageStrategy" value="ssd">
+                            <div class="radio-custom">
+                                <div class="radio-circle"></div>
+                            </div>
+                            <div class="radio-info">
+                                <div class="radio-title-row">
+                                    <span class="radio-title">Диск / SSD Demand Mode</span>
+                                    <span class="pill pill-eco">Экономия памяти</span>
+                                </div>
+                                <p class="radio-desc">Маппит страницы памяти с диска по требованию (`mmap`). Подгрузка происходит лениво ядрами Linux при обращениях.</p>
+                            </div>
+                        </label>
+                    </div>
+
+                    <div class="advanced-toggles">
+                        <label class="checkbox-option">
+                            <input type="checkbox" id="chkLockRam" checked>
+                            <span class="checkbox-custom"></span>
+                            <span class="checkbox-label">Зафиксировать страницы в RAM (`mlock`) — исключить файл подкачки</span>
+                        </label>
+                        <label class="checkbox-option">
+                            <input type="checkbox" id="chkPrefetch" checked>
+                            <span class="checkbox-custom"></span>
+                            <span class="checkbox-label">Упреждающая подгрузка импортируемых DLL в оперативную память</span>
+                        </label>
+                    </div>
+
+                    <!-- Action Start Button -->
+                    <div class="action-footer">
+                        <button class="btn btn-primary btn-start" id="btnStart">
+                            <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                            <span>СТАРТ RINE ENGINE</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Right Execution & Stats Column -->
+                <div class="stats-column">
+                    <!-- PE Memory Inspector -->
+                    <div class="inspector-card">
+                        <div class="card-header">
+                            <h3>Инспектор заголовков PE64</h3>
+                            <span class="status-dot green" id="statusDot">Готов к запуску</span>
+                        </div>
+                        <div class="pe-specs-grid">
+                            <div class="spec-item">
+                                <span class="spec-label">Целевая архитектура</span>
+                                <span class="spec-value" id="specArch">x86_64 (AMD64)</span>
+                            </div>
+                            <div class="spec-item">
+                                <span class="spec-label">Точка входа (Entry Point RVA)</span>
+                                <span class="spec-value code" id="specEntryPoint">0x000452F0</span>
+                            </div>
+                            <div class="spec-item">
+                                <span class="spec-label">Базовый адрес (Image Base)</span>
+                                <span class="spec-value code" id="specImageBase">0x0000000140000000</span>
+                            </div>
+                            <div class="spec-item">
+                                <span class="spec-label">Виртуальный адрес PEB64</span>
+                                <span class="spec-value code" id="specPeb">0x00007FFF82C10000</span>
+                            </div>
+                            <div class="spec-item">
+                                <span class="spec-label">Виртуальный адрес TEB64</span>
+                                <span class="spec-value code" id="specTeb">0x00007FFF82C11000</span>
+                            </div>
+                            <div class="spec-item">
+                                <span class="spec-label">Выравнивание страниц</span>
+                                <span class="spec-value" id="specAlign">4096 байт (POSIX)</span>
+                            </div>
+                        </div>
+
+                        <div class="section-map-container">
+                            <span class="section-map-title">Карта секций памяти PE</span>
+                            <div class="section-bars" id="sectionBars">
+                                <div class="sec-bar sec-text" style="flex: 4;" title=".text (Код): EXECUTE | READ">.text</div>
+                                <div class="sec-bar sec-rdata" style="flex: 2;" title=".rdata (Данные): READONLY">.rdata</div>
+                                <div class="sec-bar sec-data" style="flex: 2;" title=".data (Переменные): READWRITE">.data</div>
+                                <div class="sec-bar sec-reloc" style="flex: 1;" title=".reloc (Релокации): READONLY">.reloc</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Console Terminal Output -->
+                    <div class="console-card">
+                        <div class="console-header">
+                            <span class="console-title">Консоль ядра Rine Engine</span>
+                            <button class="btn-clear-console" id="btnClearConsole">Очистить</button>
+                        </div>
+                        <div class="console-body" id="consoleBody">
+                            <div class="log-line sys">[RINE CORE] Инициализация графической панели Rine Control Panel...</div>
+                            <div class="log-line sys">[RINE CORE] Загружена подсистема трансляции Win64 API (AGPLv3).</div>
+                            <div class="log-line sys">[RINE MEM] Доступны стратегии: RAM-buffering (`memfd_create`) и SSD Demand (`mmap`).</div>
+                            <div class="log-line info">[SYS] Выберите .exe файл и нажмите "СТАРТ RINE ENGINE".</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

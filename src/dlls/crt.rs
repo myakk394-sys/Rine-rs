@@ -1,14 +1,67 @@
 #![allow(non_snake_case)]
 use std::ffi::c_void;
 
+const ALIGNED_HEADER_MAGIC: usize = 0xA116_4ED0_1234_5678;
+
+#[repr(C)]
+struct AlignedBlockHeader {
+    magic: usize,
+    raw_ptr: usize,
+    requested_size: usize,
+    alignment: usize,
+}
+
+#[derive(Clone, Copy)]
+struct AlignedAllocInfo {
+    raw_ptr: usize,
+    size: usize,
+}
+
+static ALIGNED_ALLOCS: std::sync::Mutex<Option<std::collections::HashMap<usize, AlignedAllocInfo>>> =
+    std::sync::Mutex::new(None);
+
+fn register_aligned_alloc(aligned_ptr: usize, raw_ptr: usize, size: usize) {
+    if let Ok(mut lock) = ALIGNED_ALLOCS.lock() {
+        let map = lock.get_or_insert_with(std::collections::HashMap::new);
+        map.insert(aligned_ptr, AlignedAllocInfo { raw_ptr, size });
+    }
+}
+
+fn unregister_aligned_alloc(ptr: usize) -> Option<AlignedAllocInfo> {
+    if let Ok(mut lock) = ALIGNED_ALLOCS.lock() {
+        if let Some(map) = lock.as_mut() {
+            return map.remove(&ptr);
+        }
+    }
+    None
+}
+
+fn get_aligned_alloc_size(ptr: usize) -> Option<usize> {
+    if let Ok(lock) = ALIGNED_ALLOCS.lock() {
+        if let Some(map) = lock.as_ref() {
+            return map.get(&ptr).map(|info| info.size);
+        }
+    }
+    None
+}
+
 pub unsafe extern "win64" fn msvcrt_malloc(size: usize) -> *mut c_void {
-    libc::malloc(size)
+    let heap = crate::dlls::kernel32::GetProcessHeap();
+    crate::dlls::kernel32::HeapAlloc(heap, 0, size) as *mut c_void
 }
 
 pub unsafe extern "win64" fn msvcrt_free(ptr: *mut c_void) {
-    if !ptr.is_null() && (ptr as usize) < 0x700000000000 {
-        libc::free(ptr);
+    if ptr.is_null() {
+        return;
     }
+    let p = ptr as usize;
+    if let Some(info) = unregister_aligned_alloc(p) {
+        let heap = crate::dlls::kernel32::GetProcessHeap();
+        crate::dlls::kernel32::HeapFree(heap, 0, info.raw_ptr);
+        return;
+    }
+    let heap = crate::dlls::kernel32::GetProcessHeap();
+    crate::dlls::kernel32::HeapFree(heap, 0, p);
 }
 
 pub unsafe extern "win64" fn msvcrt_memset(dest: *mut c_void, c: i32, n: usize) -> *mut c_void {
@@ -171,8 +224,16 @@ pub unsafe fn resolve_file_stream(stream: *mut libc::FILE) -> *mut libc::FILE {
     if stream.is_null() {
         return std::ptr::null_mut();
     }
-    let dummy_start = &raw mut DUMMY_IOB as *mut FILE as usize;
     let stream_addr = stream as usize;
+    if stream_addr < 0x10000 {
+        return match stream_addr {
+            0 => stdin,
+            1 => stdout,
+            2 => stderr,
+            _ => std::ptr::null_mut(),
+        };
+    }
+    let dummy_start = &raw mut DUMMY_IOB as *mut FILE as usize;
     if stream_addr >= dummy_start && stream_addr < dummy_start + 3 * std::mem::size_of::<FILE>() {
         let index = (stream_addr - dummy_start) / std::mem::size_of::<FILE>();
         match index {
@@ -365,18 +426,26 @@ pub unsafe extern "win64" fn _wstat64(path: *const u16, buf: *mut u8) -> i32 {
 }
 
 pub unsafe extern "win64" fn vfprintf(
-    _stream: *mut std::ffi::c_void,
+    stream: *mut libc::FILE,
     format: *const libc::c_char,
-    _argptr: *mut u8,
+    argptr: *mut u64,
 ) -> i32 {
     if format.is_null() {
         return -1;
     }
-    let c_str = std::ffi::CStr::from_ptr(format);
-    if let Ok(s) = c_str.to_str() {
-        eprintln!("[GODOT STDERR/LOG] {}", s);
+    let mut temp = [0u8; 8192];
+    let written = format_win64_vsprintf(
+        temp.as_mut_ptr() as *mut libc::c_char,
+        temp.len(),
+        format,
+        argptr,
+    );
+    if written > 0 {
+        let s = resolve_file_stream(stream);
+        let target = if !s.is_null() { s } else { stdout };
+        libc::fwrite(temp.as_ptr() as *const libc::c_void, 1, written as usize, target);
     }
-    0
+    written
 }
 
 pub unsafe extern "win64" fn fwrite(
@@ -388,7 +457,11 @@ pub unsafe extern "win64" fn fwrite(
     if stream.is_null() || ptr.is_null() || size == 0 || count == 0 {
         return 0;
     }
-    libc::fwrite(ptr, size, count, stream)
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
+        return 0;
+    }
+    libc::fwrite(ptr, size, count, s)
 }
 
 pub unsafe extern "win64" fn msvcrt_fopen(
@@ -455,6 +528,52 @@ pub unsafe extern "win64" fn msvcrt_wfsopen(
     msvcrt_wfopen(filename, mode)
 }
 
+pub unsafe extern "win64" fn msvcrt_open_osfhandle(osfhandle: usize, _flags: i32) -> i32 {
+    let fd = osfhandle as i32;
+    println!("[MSVCRT] _open_osfhandle(osfhandle=0x{:X}) -> fd={}", osfhandle, fd);
+    if fd >= 0 {
+        fd
+    } else {
+        -1
+    }
+}
+
+pub unsafe extern "win64" fn msvcrt_get_osfhandle(fd: i32) -> usize {
+    println!("[MSVCRT] _get_osfhandle(fd={}) -> 0x{:X}", fd, fd as usize);
+    if fd >= 0 {
+        fd as usize
+    } else {
+        !0usize
+    }
+}
+
+pub unsafe extern "win64" fn msvcrt_fdopen(fd: i32, mode: *const libc::c_char) -> *mut libc::FILE {
+    if mode.is_null() {
+        return std::ptr::null_mut();
+    }
+    let fp = libc::fdopen(fd, mode);
+    println!("[MSVCRT] _fdopen(fd={}, mode={:?}) -> {:p}", fd, std::ffi::CStr::from_ptr(mode), fp);
+    fp
+}
+
+pub unsafe extern "win64" fn msvcrt_wfdopen(fd: i32, mode: *const u16) -> *mut libc::FILE {
+    if mode.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut mlen = 0usize;
+    while *mode.add(mlen) != 0 {
+        mlen += 1;
+    }
+    let mode_str = String::from_utf16_lossy(std::slice::from_raw_parts(mode, mlen));
+    let c_mode = match std::ffi::CString::new(mode_str.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let fp = libc::fdopen(fd, c_mode.as_ptr());
+    println!("[MSVCRT] _wfdopen(fd={}, mode='{}') -> {:p}", fd, mode_str, fp);
+    fp
+}
+
 pub unsafe extern "win64" fn msvcrt_filelengthi64(fd: i32) -> i64 {
     let mut st: libc::stat = std::mem::zeroed();
     if libc::fstat(fd, &mut st) == 0 {
@@ -465,11 +584,20 @@ pub unsafe extern "win64" fn msvcrt_filelengthi64(fd: i32) -> i64 {
 }
 
 pub unsafe extern "win64" fn msvcrt_fileno(stream: *mut libc::FILE) -> i32 {
-    if !stream.is_null() {
-        libc::fileno(stream)
-    } else {
-        -1
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
+        return -1;
     }
+    if s == stdin {
+        return 0;
+    }
+    if s == stdout {
+        return 1;
+    }
+    if s == stderr {
+        return 2;
+    }
+    libc::fileno(s)
 }
 
 pub unsafe extern "win64" fn msvcrt_lseeki64(fd: i32, offset: i64, origin: i32) -> i64 {
@@ -483,11 +611,11 @@ pub unsafe extern "win64" fn msvcrt_lseeki64(fd: i32, offset: i64, origin: i32) 
 }
 
 pub unsafe extern "win64" fn msvcrt_fclose(stream: *mut libc::FILE) -> i32 {
-    if !stream.is_null() {
-        libc::fclose(stream)
-    } else {
-        0
+    let s = resolve_file_stream(stream);
+    if s.is_null() || s == stdin || s == stdout || s == stderr {
+        return 0;
     }
+    libc::fclose(s)
 }
 
 pub unsafe extern "win64" fn msvcrt_fread(
@@ -499,7 +627,66 @@ pub unsafe extern "win64" fn msvcrt_fread(
     if stream.is_null() || ptr.is_null() || size == 0 || count == 0 {
         return 0;
     }
-    libc::fread(ptr, size, count, stream)
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
+        return 0;
+    }
+    libc::fread(ptr, size, count, s)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn msvcrt_write(
+    fd: i32,
+    buffer: *const std::ffi::c_void,
+    count: u32,
+) -> i32 {
+    if buffer.is_null() || count == 0 {
+        return 0;
+    }
+    let res = libc::write(fd, buffer, count as usize);
+    if res < 0 {
+        *libc::__errno_location() = *libc::__errno_location();
+        -1
+    } else {
+        res as i32
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn msvcrt_read(
+    fd: i32,
+    buffer: *mut std::ffi::c_void,
+    count: u32,
+) -> i32 {
+    if buffer.is_null() || count == 0 {
+        return 0;
+    }
+    let res = libc::read(fd, buffer, count as usize);
+    if res < 0 {
+        *libc::__errno_location() = *libc::__errno_location();
+        -1
+    } else {
+        res as i32
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn msvcrt_close(fd: i32) -> i32 {
+    libc::close(fd)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn msvcrt_setvbuf(
+    stream: *mut libc::FILE,
+    _buf: *mut libc::c_char,
+    _mode: i32,
+    _size: usize,
+) -> i32 {
+    if stream.is_null() {
+        return -1;
+    }
+    // Safely return 0 (success) without passing non-glibc or dummy FILE pointers to host libc.
+    0
 }
 
 pub unsafe extern "win64" fn msvcrt_fseek(
@@ -507,24 +694,30 @@ pub unsafe extern "win64" fn msvcrt_fseek(
     offset: i64,
     origin: i32,
 ) -> i32 {
-    if stream.is_null() {
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
         return -1;
     }
-    libc::fseeko(stream, offset as libc::off_t, origin)
+    libc::fseeko(s, offset as libc::off_t, origin)
 }
 
 pub unsafe extern "win64" fn msvcrt_ftell(stream: *mut libc::FILE) -> i64 {
-    if stream.is_null() {
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
         return -1;
     }
-    libc::ftello(stream) as i64
+    libc::ftello(s) as i64
 }
 
 pub unsafe extern "win64" fn msvcrt_fgetpos(stream: *mut libc::FILE, pos: *mut i64) -> i32 {
-    if stream.is_null() || pos.is_null() {
+    if pos.is_null() {
         return -1;
     }
-    let p = libc::ftello(stream);
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
+        return -1;
+    }
+    let p = libc::ftello(s);
     if p < 0 {
         return -1;
     }
@@ -533,17 +726,26 @@ pub unsafe extern "win64" fn msvcrt_fgetpos(stream: *mut libc::FILE, pos: *mut i
 }
 
 pub unsafe extern "win64" fn msvcrt_fsetpos(stream: *mut libc::FILE, pos: *const i64) -> i32 {
-    if stream.is_null() || pos.is_null() {
+    if pos.is_null() {
         return -1;
     }
-    libc::fseeko(stream, *pos as libc::off_t, libc::SEEK_SET)
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
+        return -1;
+    }
+    libc::fseeko(s, *pos as libc::off_t, libc::SEEK_SET)
 }
 
 pub unsafe extern "win64" fn fflush(stream: *mut libc::FILE) -> i32 {
-    if !stream.is_null() {
-        libc::fflush(stream)
-    } else {
+    if stream.is_null() {
         libc::fflush(std::ptr::null_mut())
+    } else {
+        let s = resolve_file_stream(stream);
+        if !s.is_null() {
+            libc::fflush(s)
+        } else {
+            0
+        }
     }
 }
 
@@ -913,25 +1115,58 @@ pub unsafe extern "win64" fn msvcrt_wcslen(s: *const u16) -> usize {
 }
 
 pub unsafe extern "win64" fn msvcrt_calloc(nmemb: usize, size: usize) -> *mut c_void {
-    libc::calloc(nmemb, size)
+    let total = match nmemb.checked_mul(size) {
+        Some(t) => t,
+        None => return std::ptr::null_mut(),
+    };
+    let heap = crate::dlls::kernel32::GetProcessHeap();
+    crate::dlls::kernel32::HeapAlloc(heap, 0x00000008 /* HEAP_ZERO_MEMORY */, total) as *mut c_void
 }
 
 pub unsafe extern "win64" fn msvcrt_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
-    libc::realloc(ptr, size)
+    if ptr.is_null() {
+        return msvcrt_malloc(size);
+    }
+    if size == 0 {
+        msvcrt_free(ptr);
+        return std::ptr::null_mut();
+    }
+    let heap = crate::dlls::kernel32::GetProcessHeap();
+    crate::dlls::kernel32::HeapReAlloc(heap, 0, ptr as usize, size) as *mut c_void
 }
 
 pub unsafe extern "win64" fn msvcrt_aligned_malloc(size: usize, alignment: usize) -> *mut c_void {
-    let mut ptr: *mut libc::c_void = std::ptr::null_mut();
-    let align = if alignment < 8 { 8 } else { alignment };
-    if libc::posix_memalign(&mut ptr, align, size) == 0 {
-        ptr
-    } else {
-        std::ptr::null_mut()
+    if size == 0 {
+        return std::ptr::null_mut();
     }
+    let align = alignment.max(16).next_power_of_two();
+    let total_size = match size.checked_add(align) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let heap = crate::dlls::kernel32::GetProcessHeap();
+    let raw = crate::dlls::kernel32::HeapAlloc(heap, 0, total_size) as *mut u8;
+    if raw.is_null() {
+        return std::ptr::null_mut();
+    }
+    let raw_addr = raw as usize;
+    let aligned_addr = (raw_addr + align - 1) & !(align - 1);
+    register_aligned_alloc(aligned_addr, raw_addr, size);
+    aligned_addr as *mut c_void
 }
 
 pub unsafe extern "win64" fn msvcrt_aligned_free(ptr: *mut c_void) {
-    msvcrt_free(ptr)
+    if ptr.is_null() {
+        return;
+    }
+    let p = ptr as usize;
+    if let Some(info) = unregister_aligned_alloc(p) {
+        let heap = crate::dlls::kernel32::GetProcessHeap();
+        crate::dlls::kernel32::HeapFree(heap, 0, info.raw_ptr);
+    } else {
+        let heap = crate::dlls::kernel32::GetProcessHeap();
+        crate::dlls::kernel32::HeapFree(heap, 0, p);
+    }
 }
 
 pub unsafe extern "win64" fn msvcrt_aligned_realloc(
@@ -948,23 +1183,46 @@ pub unsafe extern "win64" fn msvcrt_aligned_realloc(
     }
     let new_ptr = msvcrt_aligned_malloc(size, alignment);
     if !new_ptr.is_null() {
-        let old_size = libc::malloc_usable_size(ptr);
-        let copy_len = if old_size > 0 {
-            old_size.min(size)
-        } else {
-            size
-        };
+        let p = ptr as usize;
+        let old_size = get_aligned_alloc_size(p).unwrap_or_else(|| msvcrt_msize(ptr));
+        let copy_len = if old_size > 0 { old_size.min(size) } else { size };
         libc::memcpy(new_ptr, ptr, copy_len);
         msvcrt_aligned_free(ptr);
     }
     new_ptr
 }
 
+pub unsafe extern "win64" fn msvcrt_aligned_msize(
+    ptr: *mut c_void,
+    _alignment: usize,
+    _offset: usize,
+) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    let p = ptr as usize;
+    if let Some(sz) = get_aligned_alloc_size(p) {
+        return sz;
+    }
+    msvcrt_msize(ptr)
+}
+
 pub unsafe extern "win64" fn msvcrt_msize(ptr: *mut c_void) -> usize {
     if ptr.is_null() {
+        return 0;
+    }
+    let p = ptr as usize;
+    if let Some(sz) = get_aligned_alloc_size(p) {
+        return sz;
+    }
+    let heap = crate::dlls::kernel32::GetProcessHeap();
+    let sz = crate::dlls::kernel32::HeapSize(heap, 0, p);
+    if sz == usize::MAX {
+        // Unknown pointer (VirtualAlloc, static PE, GC arena).
+        // Return 0 safely without calling libc::malloc_usable_size!
         0
     } else {
-        libc::malloc_usable_size(ptr)
+        sz
     }
 }
 
@@ -1216,7 +1474,15 @@ pub unsafe fn format_win64_vsprintf(
                     } else {
                         0
                     };
-                    if spec.contains("lld") || spec.contains("I64d") || spec.contains("jd") {
+                    let is_zero_pad = spec.starts_with("%0");
+                    let width_str: String = spec.chars().filter(|ch| ch.is_ascii_digit()).collect();
+                    if let Ok(width) = width_str.parse::<usize>() {
+                        if is_zero_pad {
+                            out.push_str(&format!("{:0width$}", val, width = width));
+                        } else {
+                            out.push_str(&format!("{:width$}", val, width = width));
+                        }
+                    } else if spec.contains("lld") || spec.contains("I64d") || spec.contains("jd") {
                         out.push_str(&format!("{}", val));
                     } else {
                         out.push_str(&format!("{}", val as i32));
@@ -1231,7 +1497,15 @@ pub unsafe fn format_win64_vsprintf(
                     } else {
                         0
                     };
-                    if spec.contains("llu") || spec.contains("I64u") || spec.contains("zu") {
+                    let is_zero_pad = spec.starts_with("%0");
+                    let width_str: String = spec.chars().filter(|ch| ch.is_ascii_digit()).collect();
+                    if let Ok(width) = width_str.parse::<usize>() {
+                        if is_zero_pad {
+                            out.push_str(&format!("{:0width$}", val, width = width));
+                        } else {
+                            out.push_str(&format!("{:width$}", val, width = width));
+                        }
+                    } else if spec.contains("llu") || spec.contains("I64u") || spec.contains("zu") {
                         out.push_str(&format!("{}", val));
                     } else {
                         out.push_str(&format!("{}", val as u32));
@@ -1318,6 +1592,182 @@ pub unsafe fn format_win64_vsprintf(
     copy_len as i32
 }
 
+pub unsafe fn format_win64_vswprintf(
+    buffer: *mut u16,
+    buffer_count: usize,
+    format: *const u16,
+    mut arglist: *mut u64,
+) -> i32 {
+    if buffer.is_null()
+        || format.is_null()
+        || buffer_count == 0
+        || (buffer as usize) < 0x10000
+        || (format as usize) < 0x10000
+    {
+        return -1;
+    }
+
+    let mut fmt_len = 0;
+    while *format.add(fmt_len) != 0 {
+        fmt_len += 1;
+    }
+    let fmt_str = String::from_utf16_lossy(std::slice::from_raw_parts(format, fmt_len));
+    let mut out = String::new();
+    let mut chars = fmt_str.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+
+        if chars.peek() == Some(&'%') {
+            chars.next();
+            out.push('%');
+            continue;
+        }
+
+        let mut spec = String::from("%");
+        while let Some(&next_c) = chars.peek() {
+            chars.next();
+            spec.push(next_c);
+            match next_c {
+                'd' | 'i' => {
+                    let val = if !arglist.is_null() {
+                        let v = *arglist as i64;
+                        arglist = arglist.add(1);
+                        v
+                    } else {
+                        0
+                    };
+                    let is_zero_pad = spec.starts_with("%0");
+                    let width_str: String = spec.chars().filter(|ch| ch.is_ascii_digit()).collect();
+                    if let Ok(width) = width_str.parse::<usize>() {
+                        if is_zero_pad {
+                            out.push_str(&format!("{:0width$}", val, width = width));
+                        } else {
+                            out.push_str(&format!("{:width$}", val, width = width));
+                        }
+                    } else if spec.contains("lld") || spec.contains("I64d") || spec.contains("jd") {
+                        out.push_str(&format!("{}", val));
+                    } else {
+                        out.push_str(&format!("{}", val as i32));
+                    }
+                    break;
+                }
+                'u' => {
+                    let val = if !arglist.is_null() {
+                        let v = *arglist;
+                        arglist = arglist.add(1);
+                        v
+                    } else {
+                        0
+                    };
+                    let is_zero_pad = spec.starts_with("%0");
+                    let width_str: String = spec.chars().filter(|ch| ch.is_ascii_digit()).collect();
+                    if let Ok(width) = width_str.parse::<usize>() {
+                        if is_zero_pad {
+                            out.push_str(&format!("{:0width$}", val, width = width));
+                        } else {
+                            out.push_str(&format!("{:width$}", val, width = width));
+                        }
+                    } else if spec.contains("llu") || spec.contains("I64u") || spec.contains("zu") {
+                        out.push_str(&format!("{}", val));
+                    } else {
+                        out.push_str(&format!("{}", val as u32));
+                    }
+                    break;
+                }
+                'x' | 'X' => {
+                    let val = if !arglist.is_null() {
+                        let v = *arglist;
+                        arglist = arglist.add(1);
+                        v
+                    } else {
+                        0
+                    };
+                    if next_c == 'X' {
+                        out.push_str(&format!("{:X}", val as u32));
+                    } else {
+                        out.push_str(&format!("{:x}", val as u32));
+                    }
+                    break;
+                }
+                'p' => {
+                    let val = if !arglist.is_null() {
+                        let v = *arglist;
+                        arglist = arglist.add(1);
+                        v
+                    } else {
+                        0
+                    };
+                    out.push_str(&format!("0x{:016X}", val));
+                    break;
+                }
+                's' | 'S' => {
+                    let ptr = if !arglist.is_null() {
+                        let p = *arglist as usize;
+                        arglist = arglist.add(1);
+                        p
+                    } else {
+                        0
+                    };
+                    if ptr < 0x10000 {
+                        out.push_str("(null)");
+                    } else if spec.contains("hs") || next_c == 'S' {
+                        let s = std::ffi::CStr::from_ptr(ptr as *const libc::c_char).to_string_lossy();
+                        out.push_str(&s);
+                    } else {
+                        let p16 = ptr as *const u16;
+                        let mut len = 0;
+                        while *p16.add(len) != 0 {
+                            len += 1;
+                        }
+                        let s = String::from_utf16_lossy(std::slice::from_raw_parts(p16, len));
+                        out.push_str(&s);
+                    }
+                    break;
+                }
+                'c' | 'C' => {
+                    let val = if !arglist.is_null() {
+                        let v = *arglist as u16;
+                        arglist = arglist.add(1);
+                        v
+                    } else {
+                        0
+                    };
+                    if let Some(ch) = char::from_u32(val as u32) {
+                        out.push(ch);
+                    }
+                    break;
+                }
+                'f' | 'g' | 'e' => {
+                    let val = if !arglist.is_null() {
+                        let bits = *arglist;
+                        arglist = arglist.add(1);
+                        f64::from_bits(bits)
+                    } else {
+                        0.0
+                    };
+                    out.push_str(&format!("{:.6}", val));
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let u16_chars: Vec<u16> = out.encode_utf16().collect();
+    let copy_len = u16_chars.len().min(buffer_count.saturating_sub(1));
+    if copy_len > 0 {
+        std::ptr::copy_nonoverlapping(u16_chars.as_ptr(), buffer, copy_len);
+    }
+    if buffer_count > 0 {
+        *buffer.add(copy_len) = 0;
+    }
+    copy_len as i32
+}
+
 pub unsafe extern "win64" fn __stdio_common_vsprintf_s(
     _options: u64,
     buffer: *mut libc::c_char,
@@ -1338,6 +1788,31 @@ pub unsafe extern "win64" fn __stdio_common_vsprintf(
     arglist: *mut u64,
 ) -> i32 {
     format_win64_vsprintf(buffer, buffer_count, format, arglist)
+}
+
+pub unsafe extern "win64" fn __stdio_common_vfprintf(
+    _options: u64,
+    stream: *mut libc::FILE,
+    format: *const libc::c_char,
+    _locale: *mut std::ffi::c_void,
+    arglist: *mut u64,
+) -> i32 {
+    if format.is_null() {
+        return -1;
+    }
+    let mut temp = [0u8; 8192];
+    let written = format_win64_vsprintf(
+        temp.as_mut_ptr() as *mut libc::c_char,
+        temp.len(),
+        format,
+        arglist,
+    );
+    if written > 0 {
+        let s = resolve_file_stream(stream);
+        let target = if !s.is_null() { s } else { stdout };
+        libc::fwrite(temp.as_ptr() as *const libc::c_void, 1, written as usize, target);
+    }
+    written
 }
 
 pub unsafe extern "win64" fn vsprintf(
@@ -1884,14 +2359,27 @@ pub unsafe extern "win64" fn msvcrt_putenv_s(
     libc::setenv(name, val, 1)
 }
 
+static DEFAULT_LOCALE_C: &[u8; 2] = b"C\0";
+static DEFAULT_LOCALE_W: &[u16; 2] = &[0x0043, 0x0000];
+
 pub unsafe extern "win64" fn msvcrt_setlocale(
     _category: i32,
     locale: *const libc::c_char,
 ) -> *mut libc::c_char {
     if locale.is_null() {
-        return std::ptr::null_mut();
+        return DEFAULT_LOCALE_C.as_ptr() as *mut libc::c_char;
     }
     locale as *mut libc::c_char
+}
+
+pub unsafe extern "win64" fn msvcrt_wsetlocale(
+    _category: i32,
+    locale: *const u16,
+) -> *mut u16 {
+    if locale.is_null() {
+        return DEFAULT_LOCALE_W.as_ptr() as *mut u16;
+    }
+    locale as *mut u16
 }
 
 pub unsafe extern "win64" fn msvcrt_localeconv() -> *mut c_void {
@@ -1903,18 +2391,20 @@ pub unsafe extern "win64" fn msvcrt_mb_cur_max_func() -> i32 {
 }
 
 pub unsafe extern "win64" fn msvcrt_feof(stream: *mut libc::FILE) -> i32 {
-    if stream.is_null() {
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
         1
     } else {
-        libc::feof(stream)
+        libc::feof(s)
     }
 }
 
 pub unsafe extern "win64" fn msvcrt_ferror(stream: *mut libc::FILE) -> i32 {
-    if stream.is_null() {
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
         1
     } else {
-        libc::ferror(stream)
+        libc::ferror(s)
     }
 }
 
@@ -1930,10 +2420,14 @@ pub unsafe extern "win64" fn msvcrt_lock_file(_file: *mut libc::FILE) {}
 pub unsafe extern "win64" fn msvcrt_unlock_file(_file: *mut libc::FILE) {}
 
 pub unsafe extern "win64" fn msvcrt_fputs(s: *const libc::c_char, stream: *mut libc::FILE) -> i32 {
-    if s.is_null() || stream.is_null() {
+    if s.is_null() {
+        return -1;
+    }
+    let st = resolve_file_stream(stream);
+    if st.is_null() {
         -1
     } else {
-        libc::fputs(s, stream)
+        libc::fputs(s, st)
     }
 }
 
@@ -1942,34 +2436,41 @@ pub unsafe extern "win64" fn msvcrt_fgets(
     size: i32,
     stream: *mut libc::FILE,
 ) -> *mut libc::c_char {
-    if s.is_null() || stream.is_null() || size <= 0 {
+    if s.is_null() || size <= 0 {
+        return std::ptr::null_mut();
+    }
+    let st = resolve_file_stream(stream);
+    if st.is_null() {
         std::ptr::null_mut()
     } else {
-        libc::fgets(s, size, stream)
+        libc::fgets(s, size, st)
     }
 }
 
 pub unsafe extern "win64" fn msvcrt_fputc(c: i32, stream: *mut libc::FILE) -> i32 {
-    if stream.is_null() {
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
         -1
     } else {
-        libc::fputc(c, stream)
+        libc::fputc(c, s)
     }
 }
 
 pub unsafe extern "win64" fn msvcrt_fgetc(stream: *mut libc::FILE) -> i32 {
-    if stream.is_null() {
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
         -1
     } else {
-        libc::fgetc(stream)
+        libc::fgetc(s)
     }
 }
 
 pub unsafe extern "win64" fn msvcrt_ungetc(c: i32, stream: *mut libc::FILE) -> i32 {
-    if stream.is_null() {
+    let s = resolve_file_stream(stream);
+    if s.is_null() {
         -1
     } else {
-        libc::ungetc(c, stream)
+        libc::ungetc(c, s)
     }
 }
 
@@ -2575,7 +3076,10 @@ mod tests {
                 msvcrt_longjmp(jmp_buf.as_ptr() as *const c_void, 42);
                 panic!("msvcrt_longjmp must not return here");
             } else {
-                assert_eq!(res, 42, "msvcrt_setjmp must return the value passed to longjmp");
+                assert_eq!(
+                    res, 42,
+                    "msvcrt_setjmp must return the value passed to longjmp"
+                );
             }
         }
     }
@@ -2589,7 +3093,10 @@ mod tests {
                 msvcrt_longjmp(jmp_buf.as_ptr() as *const c_void, 0);
                 panic!("msvcrt_longjmp must not return here");
             } else {
-                assert_eq!(res, 1, "longjmp with val=0 must cause setjmp to return 1 per Win64 CRT spec");
+                assert_eq!(
+                    res, 1,
+                    "longjmp with val=0 must cause setjmp to return 1 per Win64 CRT spec"
+                );
             }
         }
     }
@@ -2612,14 +3119,26 @@ mod tests {
         unsafe {
             let res = msvcrt_setjmp(buf.jmp_buf.as_mut_ptr() as *mut c_void);
             if res == 0 {
-                assert_eq!(buf.prefix_canary, [0x5A; 32], "prefix canary must not be modified by setjmp");
-                assert_eq!(buf.suffix_canary, [0xA5; 32], "suffix canary must not be modified by setjmp");
+                assert_eq!(
+                    buf.prefix_canary, [0x5A; 32],
+                    "prefix canary must not be modified by setjmp"
+                );
+                assert_eq!(
+                    buf.suffix_canary, [0xA5; 32],
+                    "suffix canary must not be modified by setjmp"
+                );
                 msvcrt_longjmp(buf.jmp_buf.as_ptr() as *const c_void, 77);
                 panic!("longjmp must not return");
             } else {
                 assert_eq!(res, 77);
-                assert_eq!(buf.prefix_canary, [0x5A; 32], "prefix canary must remain intact after longjmp");
-                assert_eq!(buf.suffix_canary, [0xA5; 32], "suffix canary must remain intact after longjmp");
+                assert_eq!(
+                    buf.prefix_canary, [0x5A; 32],
+                    "prefix canary must remain intact after longjmp"
+                );
+                assert_eq!(
+                    buf.suffix_canary, [0xA5; 32],
+                    "suffix canary must remain intact after longjmp"
+                );
             }
         }
     }
@@ -2636,7 +3155,11 @@ mod tests {
                 assert_ne!(saved_rsp, 0, "saved RSP must be non-zero");
                 assert_ne!(saved_rip, 0, "saved RIP must be non-zero");
                 // Stack pointer should be 8-byte aligned (RSP % 8 == 0)
-                assert_eq!(saved_rsp % 8, 0, "saved RSP must be at least 8-byte aligned");
+                assert_eq!(
+                    saved_rsp % 8,
+                    0,
+                    "saved RSP must be at least 8-byte aligned"
+                );
 
                 // Verify MXCSR (offset 0x58) is non-zero (standard default is 0x1F80)
                 let mxcsr = u32::from_le_bytes(jmp_buf[0x58..0x5C].try_into().unwrap());
@@ -2658,13 +3181,18 @@ mod tests {
                 // Verify that XMM buffer space is populated and accessible
                 for i in 0..10 {
                     let offset = 0x60 + i * 16;
-                    let _xmm_part1 = u64::from_le_bytes(jmp_buf[offset..offset + 8].try_into().unwrap());
-                    let _xmm_part2 = u64::from_le_bytes(jmp_buf[offset + 8..offset + 16].try_into().unwrap());
+                    let _xmm_part1 =
+                        u64::from_le_bytes(jmp_buf[offset..offset + 8].try_into().unwrap());
+                    let _xmm_part2 =
+                        u64::from_le_bytes(jmp_buf[offset + 8..offset + 16].try_into().unwrap());
                 }
                 msvcrt_longjmp(jmp_buf.as_ptr() as *const c_void, 12345);
                 panic!("longjmp must not return");
             } else {
-                assert_eq!(res, 12345, "setjmp continuation must receive longjmp argument");
+                assert_eq!(
+                    res, 12345,
+                    "setjmp continuation must receive longjmp argument"
+                );
             }
         }
     }
@@ -2680,19 +3208,58 @@ mod tests {
         unsafe {
             let fp_w = libc::fopen(c_path.as_ptr(), c_mode_w.as_ptr());
             assert!(!fp_w.is_null());
-            let written = fwrite(data.as_ptr() as *const std::ffi::c_void, 1, data.len(), fp_w);
+            let written = fwrite(
+                data.as_ptr() as *const std::ffi::c_void,
+                1,
+                data.len(),
+                fp_w,
+            );
             assert_eq!(written, data.len());
             msvcrt_fclose(fp_w);
 
             let fp_r = libc::fopen(c_path.as_ptr(), c_mode_r.as_ptr());
             assert!(!fp_r.is_null());
             let mut read_buf = vec![0u8; data.len()];
-            let read = msvcrt_fread(read_buf.as_mut_ptr() as *mut libc::c_void, 1, data.len(), fp_r);
+            let read = msvcrt_fread(
+                read_buf.as_mut_ptr() as *mut libc::c_void,
+                1,
+                data.len(),
+                fp_r,
+            );
             assert_eq!(read, data.len());
             assert_eq!(&read_buf, data);
             msvcrt_fclose(fp_r);
 
             libc::unlink(c_path.as_ptr());
+        }
+    }
+
+    #[test]
+    fn test_godot_iob_func_and_setvbuf_resilience() {
+        unsafe {
+            // 1. __iob_func returns valid pointer to dummy IOB array
+            let iob = __iob_func();
+            assert!(!iob.is_null());
+
+            // 2. Access stdout (&iob[1]) and stderr (&iob[2])
+            let stdout_dummy = iob.add(1) as *mut libc::FILE;
+            let stderr_dummy = iob.add(2) as *mut libc::FILE;
+
+            // 3. resolve_file_stream resolves dummy IOB to host streams
+            let resolved_stdout = resolve_file_stream(stdout_dummy);
+            let resolved_stderr = resolve_file_stream(stderr_dummy);
+            assert_eq!(resolved_stdout, stdout);
+            assert_eq!(resolved_stderr, stderr);
+
+            // 4. setvbuf on dummy stdout/stderr must succeed safely (return 0) without SIGSEGV
+            let res1 = msvcrt_setvbuf(stdout_dummy, std::ptr::null_mut(), 2 /* _IONBF */, 0);
+            assert_eq!(res1, 0);
+            let res2 = msvcrt_setvbuf(stderr_dummy, std::ptr::null_mut(), 2 /* _IONBF */, 0);
+            assert_eq!(res2, 0);
+
+            // 5. setvbuf with null stream returns -1
+            let res_null = msvcrt_setvbuf(std::ptr::null_mut(), std::ptr::null_mut(), 2, 0);
+            assert_eq!(res_null, -1);
         }
     }
 }

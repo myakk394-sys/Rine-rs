@@ -57,6 +57,7 @@ impl MmapRegion {
     pub fn allocate_memfd(
         name: &str,
         preferred_addr: Option<usize>,
+        total_size: usize,
         bytes: &[u8],
         prot: libc::c_int,
     ) -> Result<Self> {
@@ -70,16 +71,22 @@ impl MmapRegion {
             )));
         }
 
-        let write_res =
-            unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
-        if write_res < 0 || write_res as usize != bytes.len() {
-            unsafe { libc::close(fd) };
-            return Err(RineError::MemoryMappingFailed(
-                "failed to write binary buffer into RAM memfd".into(),
-            ));
+        let aligned_size = align_up(std::cmp::max(total_size, bytes.len()), PAGE_SIZE);
+        unsafe {
+            libc::ftruncate(fd, aligned_size as i64);
         }
 
-        let aligned_size = align_up(bytes.len(), PAGE_SIZE);
+        if !bytes.is_empty() {
+            let write_res =
+                unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+            if write_res < 0 || write_res as usize != bytes.len() {
+                unsafe { libc::close(fd) };
+                return Err(RineError::MemoryMappingFailed(
+                    "failed to write binary buffer into RAM memfd".into(),
+                ));
+            }
+        }
+
         let target_ptr = preferred_addr.unwrap_or(0) as *mut libc::c_void;
 
         let flags = if target_ptr.is_null() {

@@ -148,11 +148,23 @@ pub unsafe extern "win64" fn StretchDIBits(
 
 #[no_mangle]
 pub unsafe extern "win64" fn GetDeviceCaps(_hdc: u64, index: i32) -> i32 {
+    let bounds = crate::windowing::x11::get_host_display_bounds(0);
+    let w = if bounds.w > 0 { bounds.w } else { 1920 };
+    let h = if bounds.h > 0 { bounds.h } else { 1080 };
     match index {
-        8 => 1280, // HORZRES
-        10 => 720, // VERTRES
-        12 => 32,  // BITSPIXEL
-        116 => 60, // VREFRESH
+        4 => ((w as f32) * 25.4 / 96.0) as i32, // HORZSIZE in mm
+        6 => ((h as f32) * 25.4 / 96.0) as i32, // VERTSIZE in mm
+        8 => w,                                 // HORZRES
+        10 => h,                                // VERTRES
+        12 => 32,                               // BITSPIXEL
+        14 => 1,                                // PLANES
+        88 => 96,                               // LOGPIXELSX
+        90 => 96,                               // LOGPIXELSY
+        110 => w,                               // DESKTOPHORZRES
+        111 => h,                               // DESKTOPVERTRES
+        116 => 60,                              // VREFRESH
+        117 => 2,                               // BLTALIGNMENT
+        118 => 1,                               // SHADEBLENDCAPS
         _ => 1,
     }
 }
@@ -207,6 +219,90 @@ pub unsafe extern "win64" fn wglDeleteContext(hglrc: u64) -> i32 {
         hglrc
     );
     1
+}
+
+pub unsafe extern "win64" fn D3DKMTEscape(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTEscape(p_data={:p}) -> STATUS_NOT_SUPPORTED", p_data);
+    0xC00000BB // STATUS_NOT_SUPPORTED
+}
+
+pub unsafe extern "win64" fn D3DKMTCreateDevice(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTCreateDevice(p_data={:p}) -> STATUS_NOT_SUPPORTED", p_data);
+    0xC00000BB
+}
+
+pub unsafe extern "win64" fn D3DKMTOpenAdapterFromHdc(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTOpenAdapterFromHdc(p_data={:p}) -> STATUS_NOT_SUPPORTED", p_data);
+    0xC00000BB
+}
+
+pub unsafe extern "win64" fn D3DKMTOpenAdapterFromGdiDisplayName(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTOpenAdapterFromGdiDisplayName(p_data={:p}) -> STATUS_NOT_SUPPORTED", p_data);
+    0xC00000BB
+}
+
+pub unsafe extern "win64" fn D3DKMTOpenAdapterFromLuid(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTOpenAdapterFromLuid(p_data={:p}) -> STATUS_NOT_SUPPORTED", p_data);
+    0xC00000BB
+}
+
+pub unsafe extern "win64" fn D3DKMTCloseAdapter(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTCloseAdapter(p_data={:p}) -> STATUS_SUCCESS", p_data);
+    0 // STATUS_SUCCESS
+}
+
+pub unsafe extern "win64" fn D3DKMTDestroyDevice(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTDestroyDevice(p_data={:p}) -> STATUS_SUCCESS", p_data);
+    0
+}
+
+pub unsafe extern "win64" fn D3DKMTQueryAdapterInfo(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTQueryAdapterInfo(p_data={:p}) -> STATUS_NOT_SUPPORTED", p_data);
+    0xC00000BB
+}
+
+pub unsafe extern "win64" fn D3DKMTQueryStatistics(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTQueryStatistics(p_data={:p}) -> STATUS_NOT_SUPPORTED", p_data);
+    0xC00000BB
+}
+
+pub unsafe extern "win64" fn D3DKMTCheckVidPnExclusiveOwnership(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTCheckVidPnExclusiveOwnership(p_data={:p}) -> STATUS_NOT_SUPPORTED", p_data);
+    0xC00000BB
+}
+
+pub unsafe extern "win64" fn D3DKMTSetVidPnSourceOwner(p_data: *const std::ffi::c_void) -> u32 {
+    println!("[GDI32] D3DKMTSetVidPnSourceOwner(p_data={:p}) -> STATUS_SUCCESS", p_data);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetBitmapBits(
+    _hbit: usize,
+    cb: i32,
+    lp_bits: *mut libc::c_void,
+) -> i32 {
+    if !lp_bits.is_null() && cb > 0 {
+        std::ptr::write_bytes(lp_bits as *mut u8, 0, cb as usize);
+    }
+    cb
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetObjectA(
+    _hgdiobj: usize,
+    cb_buffer: i32,
+    lpv_object: *mut libc::c_void,
+) -> i32 {
+    if !lpv_object.is_null() && cb_buffer > 0 {
+        std::ptr::write_bytes(lpv_object as *mut u8, 0, cb_buffer as usize);
+    }
+    cb_buffer
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn DeleteDC(_hdc: usize) -> i32 {
+    1 // TRUE
 }
 
 #[cfg(test)]
