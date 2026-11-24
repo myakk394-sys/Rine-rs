@@ -15,25 +15,69 @@ pub fn resolve_vulkan_symbol(fn_name: &str) -> Option<usize> {
     crate::graphics::vulkan_bridge::resolve_vulkan_symbol(fn_name)
 }
 
-const DXVK_SEARCH_PATHS: &[&str] = &[
-    // Native Steam Proton (Arch Linux / standard)
-    "/home/fizzy/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/dxvk/x86_64-windows",
-    "/home/fizzy/.local/share/Steam/steamapps/common/Proton 9.0 (Beta)/files/lib/wine/dxvk/x86_64-windows",
-    "/home/fizzy/.local/share/Steam/steamapps/common/Proton 8.0/files/lib/wine/dxvk/x86_64-windows",
-    "/home/fizzy/.steam/steam/steamapps/common/Proton - Experimental/files/lib/wine/dxvk/x86_64-windows",
-    // Bottles (Flatpak)
-    "/home/fizzy/.var/app/com.usebottles.bottles/data/bottles/dxvk/dxvk-2.7.1/x64",
-    // Heroic Games Launcher
-    "/home/fizzy/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/dxvk/dxvk-3.0.2/x64",
-    "/home/fizzy/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/dxvk/dxvk-2.7.1/x64",
-    // Steam Proton Experimental (Snap)
-    "/home/fizzy/snap/steam/common/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/dxvk/x86_64-windows",
-    // Vinegar / Heroic / Lutris common paths
-    "/home/fizzy/.local/share/dxvk/x64",
-    "/usr/share/dxvk/x64",
-    "/usr/share/dxvk",
-    "/opt/dxvk/x64",
-];
+/// Returns dynamic DXVK search paths, prioritizing bundled/standalone Rine DXVK
+/// before falling back to system-wide or external compatibility tool paths.
+fn get_dxvk_search_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+
+    // 1. Standalone bundled DXVK next to executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            paths.push(exe_dir.join("assets/dxvk").to_string_lossy().into_owned());
+            paths.push(exe_dir.join("dxvk").to_string_lossy().into_owned());
+        }
+    }
+
+    // 2. Repository / current working directory bundled DXVK
+    paths.push("assets/dxvk".to_string());
+
+    // 3. Rine user-local standalone DXVK directory
+    paths.push(format!("{}/.local/share/rine/dxvk", home));
+
+    // 4. System-wide DXVK packages
+    paths.push("/usr/share/dxvk/x64".to_string());
+    paths.push("/usr/share/dxvk".to_string());
+    paths.push("/opt/dxvk/x64".to_string());
+    paths.push(format!("{}/.local/share/dxvk/x64", home));
+
+    // 5. Optional fallback: Steam Proton / Bottles / Heroic (only if standalone is absent)
+    paths.push(format!("{}/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/dxvk/x86_64-windows", home));
+    paths.push(format!("{}/.local/share/Steam/steamapps/common/Proton 9.0 (Beta)/files/lib/wine/dxvk/x86_64-windows", home));
+    paths.push(format!("{}/.local/share/Steam/steamapps/common/Proton 8.0/files/lib/wine/dxvk/x86_64-windows", home));
+    paths.push(format!("{}/.steam/steam/steamapps/common/Proton - Experimental/files/lib/wine/dxvk/x86_64-windows", home));
+    paths.push(format!("{}/.var/app/com.usebottles.bottles/data/bottles/dxvk/dxvk-2.7.1/x64", home));
+    paths.push(format!("{}/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/dxvk/dxvk-3.0.2/x64", home));
+    paths.push(format!("{}/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/dxvk/dxvk-2.7.1/x64", home));
+    paths.push(format!("{}/snap/steam/common/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/dxvk/x86_64-windows", home));
+
+    paths
+}
+
+/// Ensures bundled DXVK DLLs from `assets/dxvk` are deployed to `~/.local/share/rine/dxvk`
+/// if not already present, so installed `rine` binaries work standalone without Proton.
+fn ensure_standalone_dxvk_deployed(source_dir: &str) {
+    let home = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => h,
+        _ => return,
+    };
+    let target_dir = std::path::PathBuf::from(format!("{}/.local/share/rine/dxvk", home));
+    if target_dir.join("dxgi.dll").exists() && target_dir.join("d3d11.dll").exists() {
+        return;
+    }
+    if std::fs::create_dir_all(&target_dir).is_ok() {
+        if let Ok(entries) = std::fs::read_dir(source_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("dll") {
+                    if let Some(name) = path.file_name() {
+                        let _ = std::fs::copy(&path, target_dir.join(name));
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// A DXVK DLL loaded as a guest PE image. Exports are resolved from the
 /// PE export table and stored by name → virtual address.
@@ -58,13 +102,14 @@ pub fn find_dxvk_path() -> Option<&'static str> {
                 return env_path;
             }
         }
-        for path in DXVK_SEARCH_PATHS {
-            if std::path::Path::new(path).exists() {
-                let dxgi = format!("{}/dxgi.dll", path);
-                if std::path::Path::new(&dxgi).exists() {
-                    println!("[DXVK LOADER] Found DXVK at: {}", path);
-                    return path.to_string();
+        for path in get_dxvk_search_paths() {
+            let p = std::path::Path::new(&path);
+            if p.exists() && p.join("dxgi.dll").exists() && p.join("d3d11.dll").exists() {
+                if path.ends_with("assets/dxvk") {
+                    ensure_standalone_dxvk_deployed(&path);
                 }
+                println!("[DXVK LOADER] Found DXVK at: {}", path);
+                return path;
             }
         }
         println!("[DXVK LOADER] DXVK not found in any search path");
@@ -291,8 +336,9 @@ mod tests {
     #[test]
     fn test_unity_diagnostics() {
         let _guard = crate::providers::STATS_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let unity_player_path = "/home/fizzy/.local/share/Steam/steamapps/common/How to Fish/How to Fish/UnityPlayer.dll";
-        if !std::path::Path::new(unity_player_path).exists() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let unity_player_path = format!("{}/.local/share/Steam/steamapps/common/How to Fish/How to Fish/UnityPlayer.dll", home);
+        if !std::path::Path::new(&unity_player_path).exists() {
             println!("UnityPlayer.dll not found, skipping");
             return;
         }
@@ -302,7 +348,7 @@ mod tests {
             preload_dxvk(path);
         }
 
-        let bytes = std::fs::read(unity_player_path).expect("Failed to read UnityPlayer.dll");
+        let bytes = std::fs::read(&unity_player_path).expect("Failed to read UnityPlayer.dll");
         let pe = crate::pe::PeImage::parse(&bytes).expect("Failed to parse UnityPlayer.dll");
 
         let mut total_imports = 0;

@@ -796,14 +796,16 @@ impl RineNativeApp {
         self.logs.push(format!("[EXECUTE] Launching '{}' via Rine Engine...", exe_str));
         self.add_console_log(ConsoleLogLevel::Info, launch_msg);
 
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let local_rine = PathBuf::from(format!("{}/.local/bin/rine", home));
         let rine_bin = if let Ok(cur) = std::env::current_exe() {
             if cur.exists() {
                 cur
             } else {
-                PathBuf::from("/home/fizzy/.local/bin/rine")
+                local_rine
             }
-        } else if Path::new("/home/fizzy/.local/bin/rine").exists() {
-            PathBuf::from("/home/fizzy/.local/bin/rine")
+        } else if local_rine.exists() {
+            local_rine
         } else {
             PathBuf::from("./target/release/rine")
         };

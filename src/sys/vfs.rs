@@ -259,11 +259,17 @@ impl RineVfs {
 
         // Map Steam virtual path "C:\Program Files (x86)\Steam" to host Steam directory
         let lower_slash = normalized_slash.to_ascii_lowercase();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         if lower_slash.ends_with("/steamclient64.dll") || lower_slash.ends_with("/steamclient.dll") {
-            return "/home/fizzy/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/x86_64-windows/lsteamclient.dll".to_string();
+            let proton_steamclient = format!(
+                "{}/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/x86_64-windows/lsteamclient.dll",
+                home
+            );
+            if Path::new(&proton_steamclient).exists() {
+                return proton_steamclient;
+            }
         }
         if lower_slash.starts_with("c:/program files (x86)/steam") {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/fizzy".to_string());
             let sub = &normalized_slash["c:/program files (x86)/steam".len()..];
             let host_steam = format!("{}/.local/share/Steam{}", home, sub);
             if !host_steam.contains("..") {
@@ -613,12 +619,12 @@ mod tests {
         let vfs_guard = RineVfs::get();
         let vfs = vfs_guard.as_ref().unwrap();
 
-        // 1. AppData must map to drive_c/users/... NOT to real /home/fizzy
-        let appdata_win = "C:\\Users\\fizzy\\AppData\\Roaming\\Godot\\app_userdata\\test";
+        // 1. AppData must map to drive_c/users/... NOT to real $HOME
+        let appdata_win = "C:\\Users\\player\\AppData\\Roaming\\Godot\\app_userdata\\test";
         let mapped = vfs.win32_to_host_path(appdata_win);
         assert!(mapped.contains("drive_c"));
         let lower_mapped = mapped.to_ascii_lowercase();
-        assert!(lower_mapped.ends_with("/users/fizzy/appdata/roaming/godot/app_userdata/test"));
+        assert!(lower_mapped.ends_with("/users/player/appdata/roaming/godot/app_userdata/test"));
 
         // 2. Relative game data must map to drive_d
         let pck_win = "game.pck";

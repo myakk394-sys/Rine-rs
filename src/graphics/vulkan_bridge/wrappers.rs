@@ -1171,8 +1171,10 @@ pub unsafe extern "win64" fn guest_vkAcquireNextImage2KHR(
         } else {
             super::swapchain::acquire_next_image(swapchain, semaphore, fence, p_image_index)
         };
-        let idx = if !p_image_index.is_null() { *p_image_index } else { 999 };
-        println!("[VK ACQUIRE2 RESULT] res={}, out_image_index={}", res, idx);
+        if res != 0 || std::env::var_os("RINE_VK_DEBUG").is_some() {
+            let idx = if !p_image_index.is_null() { *p_image_index } else { 999 };
+            println!("[VK ACQUIRE2 RESULT] res={}, out_image_index={}", res, idx);
+        }
         return res;
     }
     VK_ERROR_INITIALIZATION_FAILED
@@ -1271,7 +1273,7 @@ pub unsafe extern "win64" fn guest_vkQueuePresentKHR(
                 println!("[RINE_READY] Game window active and rendering.");
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
-            } else if frame_num % 120 == 0 {
+            } else if frame_num % 600 == 0 && std::env::var_os("RINE_VK_DEBUG").is_some() {
                 println!("[RINE HOST PRESENT] Frame #{} rendered and presented on host swapchain 0x{:X} (VkResult={})", frame_num, swapchain, res);
             }
             crate::graphics::dxgi_vulkan::set_vulkan_presentation_confirmed();

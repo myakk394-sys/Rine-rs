@@ -176,7 +176,7 @@ fn init_default_registry() -> HashMap<String, RegValue> {
     );
 
     // Valve Steam keys
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/fizzy".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let steam_pid = std::fs::read_to_string(format!("{}/.steam/steam.pid", home))
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())

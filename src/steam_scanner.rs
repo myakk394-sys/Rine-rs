@@ -769,7 +769,7 @@ const IGNORED_APP_IDS: &[u32] = &[
 fn get_home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/home/fizzy"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
 /// Candidate Steam installation root directories across distributions.
@@ -1166,9 +1166,8 @@ mod tests {
 
     #[test]
     fn test_embedded_godot_detection() {
-        let neighbor_path = PathBuf::from(
-            "/home/fizzy/Downloads/home/fizzy/Рабочий стол/home/fizzy/Рабочий стол/перенос/That's not my neighbor (1.0.3.3) Windows/That's not my neighbor.exe",
-        );
+        let home = get_home_dir();
+        let neighbor_path = home.join("Games/That's not my neighbor (1.0.3.3) Windows/That's not my neighbor.exe");
         if neighbor_path.exists() {
             let compat = check_game_compatibility(&neighbor_path);
             println!("That's not my neighbor: {:?}", compat);
@@ -1180,9 +1179,8 @@ mod tests {
 
     #[test]
     fn test_elf_inspection_not_misidentified_as_32bit() {
-        let buckshot_elf = PathBuf::from(
-            "/home/fizzy/.local/share/Steam/steamapps/common/Buckshot Roulette/Buckshot Roulette_linux/Buckshot Roulette.x86_64",
-        );
+        let home = get_home_dir();
+        let buckshot_elf = home.join(".local/share/Steam/steamapps/common/Buckshot Roulette/Buckshot Roulette_linux/Buckshot Roulette.x86_64");
         if buckshot_elf.exists() {
             let inspection = inspect_binary(&buckshot_elf);
             assert_eq!(inspection.format, BinaryFormat::Elf64);
@@ -1195,9 +1193,8 @@ mod tests {
 
     #[test]
     fn test_pe32_32bit_inspection() {
-        let spacewar_exe = PathBuf::from(
-            "/home/fizzy/.local/share/Steam/steamapps/common/Spacewar/SteamworksExample.exe",
-        );
+        let home = get_home_dir();
+        let spacewar_exe = home.join(".local/share/Steam/steamapps/common/Spacewar/SteamworksExample.exe");
         if spacewar_exe.exists() {
             let inspection = inspect_binary(&spacewar_exe);
             assert_eq!(inspection.format, BinaryFormat::Pe32);

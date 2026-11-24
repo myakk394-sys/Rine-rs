@@ -1108,7 +1108,7 @@ pub unsafe extern "win64" fn SteamAPI_ISteamFriends_ActivateGameOverlay(
 
 // Helper to get persistent save directories for Steam Remote Storage
 fn get_steam_save_dirs() -> Vec<std::path::PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/fizzy".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let mut dirs = Vec::new();
 
     // 1. AppData/Roaming/Cuphead

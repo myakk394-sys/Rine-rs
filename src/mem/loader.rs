@@ -473,7 +473,12 @@ impl LoadedModule {
         candidate_paths.push(std::path::PathBuf::from(&host_exe_dir).join("Plugins").join(&name_lower));
 
         if name_lower == "steamclient64.dll" || name_lower == "steamclient.dll" {
-            candidate_paths.insert(0, std::path::PathBuf::from("/home/fizzy/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/x86_64-windows/lsteamclient.dll"));
+            if let Ok(home) = std::env::var("HOME") {
+                candidate_paths.push(std::path::PathBuf::from(format!(
+                    "{}/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/x86_64-windows/lsteamclient.dll",
+                    home
+                )));
+            }
         }
 
         let mut raw_bytes = None;

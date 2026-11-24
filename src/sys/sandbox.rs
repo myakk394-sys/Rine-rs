@@ -186,7 +186,7 @@ pub fn apply_landlock_sandbox(config: &SandboxConfig) -> Result<bool, String> {
         "/dev",                    // /dev/urandom, /dev/null, /dev/zero for crypto, Steam tier0, and CRT
     ];
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/fizzy".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let rine_share = format!("{}/.local/share/rine", home);
     let _ = std::fs::create_dir_all(&rine_share);
     if Path::new(&rine_share).exists() {

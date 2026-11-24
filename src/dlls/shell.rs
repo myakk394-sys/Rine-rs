@@ -782,7 +782,7 @@ pub unsafe extern "win64" fn SHDeleteKeyW(_hkey: usize, _psz_subkey: *const u16)
 }
 
 fn ensure_appdata_dir_exists() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/fizzy".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let prefix = format!("{}/.local/share/rine/prefixes/default/drive_c/users/fizzy", home);
     for sub in &["AppData/Roaming", "AppData/Local", "AppData/LocalLow", "AppData/LocalLow/Studio MDHR/Cuphead", "AppData/Roaming/Cuphead", "Documents"] {
         std::fs::create_dir_all(format!("{}/{}", home, sub)).ok();

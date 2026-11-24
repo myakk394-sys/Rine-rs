@@ -218,8 +218,10 @@ fn toggle_in_game_overlay() {
             release_cursor_and_show();
 
             println!("[RINE HOTKEY] Shift+Tab detected! Spawning In-Game Steam Overlay...");
-            let rine_exe = if std::path::Path::new("/home/fizzy/.local/bin/rine").exists() {
-                std::path::PathBuf::from("/home/fizzy/.local/bin/rine")
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            let local_rine = std::path::PathBuf::from(format!("{}/.local/bin/rine", home));
+            let rine_exe = if local_rine.exists() {
+                local_rine
             } else if let Ok(target) = std::env::var("RINE_BINARY_PATH") {
                 std::path::PathBuf::from(target)
             } else {

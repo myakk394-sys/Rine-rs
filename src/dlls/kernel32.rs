@@ -618,11 +618,30 @@ static EXACT_WAITERS_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[inline(always)]
 unsafe fn read_address_value(address: *const std::ffi::c_void, size: usize) -> u64 {
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     match size {
         1 => std::ptr::read_volatile(address as *const u8) as u64,
-        2 => (address as *const u16).read_unaligned() as u64,
-        4 => (address as *const u32).read_unaligned() as u64,
-        8 => (address as *const u64).read_unaligned(),
+        2 => {
+            if (address as usize) % 2 == 0 {
+                std::ptr::read_volatile(address as *const u16) as u64
+            } else {
+                (address as *const u16).read_unaligned() as u64
+            }
+        }
+        4 => {
+            if (address as usize) % 4 == 0 {
+                std::ptr::read_volatile(address as *const u32) as u64
+            } else {
+                (address as *const u32).read_unaligned() as u64
+            }
+        }
+        8 => {
+            if (address as usize) % 8 == 0 {
+                std::ptr::read_volatile(address as *const u64)
+            } else {
+                (address as *const u64).read_unaligned()
+            }
+        }
         _ => 0,
     }
 }
@@ -4618,7 +4637,7 @@ pub fn resolve_module_path(h_module: u64) -> String {
         get_target_exe_path()
     };
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/fizzy".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let steam_share_upper = format!("{}/.local/share/Steam", home);
     let steam_share_lower = format!("{}/.local/share/steam", home);
     let steam_prefix_len = if raw_path.starts_with(&steam_share_upper) {
@@ -4932,7 +4951,7 @@ pub fn initialize_process_filesystem(exe_path: &str, configured_cwd: Option<&str
             .unwrap_or_else(|_| ".".to_string())
     };
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/fizzy".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let steam_share = format!("{}/.local/share/Steam", home);
     let guest_win_dir = if initial_dir.starts_with(&steam_share) {
         let sub = &initial_dir[steam_share.len()..];
@@ -11189,6 +11208,370 @@ pub unsafe extern "win64" fn TerminateThread(
     1
 }
 
+// ---------------------------------------------------------------------------
+// Win64 SLIST_HEADER (Lock-Free Singly Linked List) Implementation
+// ---------------------------------------------------------------------------
+
+static SLIST_LOCKS: std::sync::LazyLock<[std::sync::Mutex<()>; 64]> =
+    std::sync::LazyLock::new(|| std::array::from_fn(|_| std::sync::Mutex::new(())));
+
+#[inline]
+fn slist_lock(head: usize) -> std::sync::MutexGuard<'static, ()> {
+    let idx = (head >> 4) % 64;
+    SLIST_LOCKS[idx].lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Initializes a 16-byte Win64 `SLIST_HEADER`.
+/// Layout used: `[0]` low 16 bits = depth, `[1]` = pointer to first `SLIST_ENTRY`.
+pub unsafe extern "win64" fn InitializeSListHead(list_head: *mut u64) {
+    if list_head.is_null() {
+        return;
+    }
+    let _g = slist_lock(list_head as usize);
+    std::ptr::write_volatile(list_head, 0);
+    std::ptr::write_volatile(list_head.add(1), 0);
+}
+
+/// Returns the number of entries in the singly linked list.
+pub unsafe extern "win64" fn QueryDepthSList(list_head: *const u64) -> u16 {
+    if list_head.is_null() {
+        return 0;
+    }
+    let _g = slist_lock(list_head as usize);
+    (std::ptr::read_volatile(list_head) & 0xFFFF) as u16
+}
+
+/// Inserts an item at the front of a singly linked list and returns the previous first item.
+pub unsafe extern "win64" fn InterlockedPushEntrySList(
+    list_head: *mut u64,
+    list_entry: *mut usize,
+) -> *mut usize {
+    if list_head.is_null() || list_entry.is_null() {
+        return std::ptr::null_mut();
+    }
+    let _g = slist_lock(list_head as usize);
+    let old_first = std::ptr::read_volatile(list_head.add(1)) as *mut usize;
+    std::ptr::write_volatile(list_entry, old_first as usize);
+    std::ptr::write_volatile(list_head.add(1), list_entry as u64);
+    let low = std::ptr::read_volatile(list_head);
+    let depth = (low & 0xFFFF).wrapping_add(1) & 0xFFFF;
+    std::ptr::write_volatile(list_head, (low & !0xFFFF) | depth);
+    old_first
+}
+
+/// Removes an item from the front of a singly linked list and returns it.
+pub unsafe extern "win64" fn InterlockedPopEntrySList(list_head: *mut u64) -> *mut usize {
+    if list_head.is_null() {
+        return std::ptr::null_mut();
+    }
+    let _g = slist_lock(list_head as usize);
+    let first = std::ptr::read_volatile(list_head.add(1)) as *mut usize;
+    if first.is_null() {
+        return std::ptr::null_mut();
+    }
+    let next = std::ptr::read_volatile(first);
+    std::ptr::write_volatile(list_head.add(1), next as u64);
+    let low = std::ptr::read_volatile(list_head);
+    let depth = low & 0xFFFF;
+    if depth > 0 {
+        std::ptr::write_volatile(list_head, (low & !0xFFFF) | (depth - 1));
+    }
+    first
+}
+
+/// Removes all items from a singly linked list and returns a pointer to the previous first item.
+pub unsafe extern "win64" fn InterlockedFlushSList(list_head: *mut u64) -> *mut usize {
+    if list_head.is_null() {
+        return std::ptr::null_mut();
+    }
+    let _g = slist_lock(list_head as usize);
+    let first = std::ptr::read_volatile(list_head.add(1)) as *mut usize;
+    std::ptr::write_volatile(list_head.add(1), 0);
+    let low = std::ptr::read_volatile(list_head);
+    std::ptr::write_volatile(list_head, low & !0xFFFF);
+    first
+}
+
+// ---------------------------------------------------------------------------
+// GetLogicalProcessorInformationEx
+// ---------------------------------------------------------------------------
+
+/// Retrieves information about the relationships of logical processors and related hardware.
+pub unsafe extern "win64" fn GetLogicalProcessorInformationEx(
+    relationship_type: u32,
+    buffer: *mut u8,
+    returned_length: *mut u32,
+) -> i32 {
+    if returned_length.is_null() {
+        SetLastError(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 64);
+    let all_mask: u64 = if num_cpus == 64 { u64::MAX } else { (1u64 << num_cpus) - 1 };
+
+    let mut out = Vec::<u8>::new();
+
+    let write_group_affinity = |buf: &mut Vec<u8>, mask: u64| {
+        buf.extend_from_slice(&mask.to_le_bytes()); // Mask: KAFFINITY (u64)
+        buf.extend_from_slice(&0u16.to_le_bytes()); // Group: u16
+        buf.extend_from_slice(&[0u8; 6]); // Reserved: [u16; 3]
+    };
+
+    // RelationProcessorCore = 0
+    if relationship_type == 0 || relationship_type == 0xFFFF {
+        for cpu in 0..num_cpus {
+            out.extend_from_slice(&0u32.to_le_bytes()); // Relationship = 0
+            out.extend_from_slice(&48u32.to_le_bytes()); // Size = 48
+            out.push(0); // Flags
+            out.push(0); // EfficiencyClass
+            out.extend_from_slice(&[0u8; 20]); // Reserved
+            out.extend_from_slice(&1u16.to_le_bytes()); // GroupCount = 1
+            write_group_affinity(&mut out, 1u64 << cpu);
+        }
+    }
+
+    // RelationNumaNode = 1
+    if relationship_type == 1 || relationship_type == 0xFFFF {
+        out.extend_from_slice(&1u32.to_le_bytes()); // Relationship = 1
+        out.extend_from_slice(&48u32.to_le_bytes()); // Size = 48
+        out.extend_from_slice(&0u32.to_le_bytes()); // NodeNumber = 0
+        out.extend_from_slice(&[0u8; 18]); // Reserved
+        out.extend_from_slice(&1u16.to_le_bytes()); // GroupCount = 1
+        write_group_affinity(&mut out, all_mask);
+    }
+
+    // RelationCache = 2
+    if relationship_type == 2 || relationship_type == 0xFFFF {
+        // Report L1/L2/L3 cache entries
+        for (level, size_bytes, cache_type) in [(1u8, 32 * 1024u32, 1u32), (2u8, 256 * 1024u32, 0u32), (3u8, 8 * 1024 * 1024u32, 0u32)] {
+            out.extend_from_slice(&2u32.to_le_bytes()); // Relationship = 2
+            out.extend_from_slice(&56u32.to_le_bytes()); // Size = 56
+            out.push(level); // Level
+            out.push(8); // Associativity
+            out.extend_from_slice(&64u16.to_le_bytes()); // LineSize = 64
+            out.extend_from_slice(&size_bytes.to_le_bytes()); // CacheSize
+            out.extend_from_slice(&cache_type.to_le_bytes()); // Type
+            out.extend_from_slice(&[0u8; 18]); // Reserved
+            out.extend_from_slice(&1u16.to_le_bytes()); // GroupCount = 1
+            write_group_affinity(&mut out, all_mask);
+        }
+    }
+
+    // RelationProcessorPackage = 3
+    if relationship_type == 3 || relationship_type == 0xFFFF {
+        out.extend_from_slice(&3u32.to_le_bytes()); // Relationship = 3
+        out.extend_from_slice(&48u32.to_le_bytes()); // Size = 48
+        out.push(0); // Flags
+        out.push(0); // EfficiencyClass
+        out.extend_from_slice(&[0u8; 20]); // Reserved
+        out.extend_from_slice(&1u16.to_le_bytes()); // GroupCount = 1
+        write_group_affinity(&mut out, all_mask);
+    }
+
+    // RelationGroup = 4
+    if relationship_type == 4 || relationship_type == 0xFFFF {
+        out.extend_from_slice(&4u32.to_le_bytes()); // Relationship = 4
+        out.extend_from_slice(&80u32.to_le_bytes()); // Size = 80
+        out.extend_from_slice(&1u16.to_le_bytes()); // MaximumGroupCount = 1
+        out.extend_from_slice(&1u16.to_le_bytes()); // ActiveGroupCount = 1
+        out.extend_from_slice(&[0u8; 20]); // Reserved
+        // PROCESSOR_GROUP_INFO (48 bytes)
+        out.push(num_cpus as u8); // MaximumProcessorCount
+        out.push(num_cpus as u8); // ActiveProcessorCount
+        out.extend_from_slice(&[0u8; 38]); // Reserved
+        out.extend_from_slice(&all_mask.to_le_bytes()); // ActiveProcessorMask
+    }
+
+    let required = out.len() as u32;
+    let provided = *returned_length;
+    *returned_length = required;
+
+    if buffer.is_null() || provided < required {
+        SetLastError(122); // ERROR_INSUFFICIENT_BUFFER
+        return 0;
+    }
+
+    std::ptr::copy_nonoverlapping(out.as_ptr(), buffer, out.len());
+    SetLastError(0);
+    1
+}
+
+// ---------------------------------------------------------------------------
+// Processor Features, Code Pages, String Comparison, Disk Space
+// ---------------------------------------------------------------------------
+
+/// Reports whether a CPU feature is supported on the current x86_64 host.
+pub unsafe extern "win64" fn IsProcessorFeaturePresent(processor_feature: u32) -> i32 {
+    match processor_feature {
+        2  // PF_COMPARE_EXCHANGE_DOUBLE
+        | 6  // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
+        | 8  // PF_RDTSC_INSTRUCTION_AVAILABLE
+        | 10 // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
+        | 12 // PF_NX_ENABLED
+        | 13 // PF_SSE3_INSTRUCTIONS_AVAILABLE
+        | 14 // PF_COMPARE_EXCHANGE128 (cmpxchg16b)
+        | 17 // PF_XSAVE_ENABLED
+        | 23 // PF_FASTFAIL_AVAILABLE
+        | 36 // PF_SSE4_1_INSTRUCTIONS_AVAILABLE
+        | 37 // PF_SSE4_2_INSTRUCTIONS_AVAILABLE
+        | 39 // PF_AVX_INSTRUCTIONS_AVAILABLE
+        | 40 // PF_AVX2_INSTRUCTIONS_AVAILABLE
+        => 1,
+        _ => 0,
+    }
+}
+
+pub unsafe extern "win64" fn GetACP() -> u32 {
+    65001 // CP_UTF8
+}
+
+pub unsafe extern "win64" fn GetOEMCP() -> u32 {
+    437
+}
+
+pub unsafe extern "win64" fn IsValidCodePage(code_page: u32) -> i32 {
+    if code_page != 0 { 1 } else { 0 }
+}
+
+pub unsafe extern "win64" fn GetDiskFreeSpaceExW(
+    _lp_directory_name: *const u16,
+    lp_free_bytes_available_to_caller: *mut u64,
+    lp_total_number_of_bytes: *mut u64,
+    lp_total_number_of_free_bytes: *mut u64,
+) -> i32 {
+    let mut stat: libc::statvfs = std::mem::zeroed();
+    let (avail, total, free) = if libc::statvfs(b"/\0".as_ptr() as *const i8, &mut stat) == 0 {
+        let frag = stat.f_frsize as u64;
+        (
+            stat.f_bavail * frag,
+            stat.f_blocks * frag,
+            stat.f_bfree * frag,
+        )
+    } else {
+        (100 * 1024 * 1024 * 1024, 500 * 1024 * 1024 * 1024, 100 * 1024 * 1024 * 1024)
+    };
+    if !lp_free_bytes_available_to_caller.is_null() {
+        *lp_free_bytes_available_to_caller = avail;
+    }
+    if !lp_total_number_of_bytes.is_null() {
+        *lp_total_number_of_bytes = total;
+    }
+    if !lp_total_number_of_free_bytes.is_null() {
+        *lp_total_number_of_free_bytes = free;
+    }
+    1
+}
+
+unsafe fn read_utf16_slice(ptr: *const u16, cch: i32) -> Vec<u16> {
+    if ptr.is_null() {
+        return Vec::new();
+    }
+    if cch < 0 {
+        let mut len = 0usize;
+        while *ptr.add(len) != 0 && len < 65536 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(ptr, len).to_vec()
+    } else {
+        std::slice::from_raw_parts(ptr, cch as usize).to_vec()
+    }
+}
+
+pub unsafe extern "win64" fn CompareStringW(
+    _locale: u32,
+    dw_cmp_flags: u32,
+    lp_string1: *const u16,
+    cch_count1: i32,
+    lp_string2: *const u16,
+    cch_count2: i32,
+) -> i32 {
+    if lp_string1.is_null() || lp_string2.is_null() {
+        SetLastError(87);
+        return 0;
+    }
+    let s1 = String::from_utf16_lossy(&read_utf16_slice(lp_string1, cch_count1));
+    let s2 = String::from_utf16_lossy(&read_utf16_slice(lp_string2, cch_count2));
+    let ord = if (dw_cmp_flags & 1) != 0 {
+        s1.to_lowercase().cmp(&s2.to_lowercase())
+    } else {
+        s1.cmp(&s2)
+    };
+    match ord {
+        std::cmp::Ordering::Less => 1,    // CSTR_LESS_THAN
+        std::cmp::Ordering::Equal => 2,   // CSTR_EQUAL
+        std::cmp::Ordering::Greater => 3, // CSTR_GREATER_THAN
+    }
+}
+
+pub unsafe extern "win64" fn CompareStringEx(
+    _lp_locale_name: *const u16,
+    dw_cmp_flags: u32,
+    lp_string1: *const u16,
+    cch_count1: i32,
+    lp_string2: *const u16,
+    cch_count2: i32,
+    _lp_version_information: usize,
+    _lp_reserved: usize,
+    _l_param: isize,
+) -> i32 {
+    CompareStringW(0, dw_cmp_flags, lp_string1, cch_count1, lp_string2, cch_count2)
+}
+
+pub unsafe extern "win64" fn LCMapStringW(
+    _locale: u32,
+    dw_map_flags: u32,
+    lp_src_str: *const u16,
+    cch_src: i32,
+    lp_dest_str: *mut u16,
+    cch_dest: i32,
+) -> i32 {
+    if lp_src_str.is_null() {
+        SetLastError(87);
+        return 0;
+    }
+    let src_u16 = read_utf16_slice(lp_src_str, cch_src);
+    let src_str = String::from_utf16_lossy(&src_u16);
+    let mapped = if (dw_map_flags & 0x00000100) != 0 {
+        src_str.to_lowercase()
+    } else if (dw_map_flags & 0x00000200) != 0 {
+        src_str.to_uppercase()
+    } else {
+        src_str
+    };
+    let mut out_u16: Vec<u16> = mapped.encode_utf16().collect();
+    if cch_src < 0 {
+        out_u16.push(0);
+    }
+    let req = out_u16.len() as i32;
+    if cch_dest == 0 || lp_dest_str.is_null() {
+        return req;
+    }
+    if cch_dest < req {
+        SetLastError(122);
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(out_u16.as_ptr(), lp_dest_str, out_u16.len());
+    req
+}
+
+pub unsafe extern "win64" fn LCMapStringEx(
+    _lp_locale_name: *const u16,
+    dw_map_flags: u32,
+    lp_src_str: *const u16,
+    cch_src: i32,
+    lp_dest_str: *mut u16,
+    cch_dest: i32,
+    _lp_version_information: usize,
+    _lp_reserved: usize,
+    _sort_handle: isize,
+) -> i32 {
+    LCMapStringW(0, dw_map_flags, lp_src_str, cch_src, lp_dest_str, cch_dest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12897,6 +13280,58 @@ mod tests {
             CloseHandle(ev1);
             CloseHandle(ev2);
             CloseHandle(ev3);
+        }
+    }
+
+    #[test]
+    fn test_slist_push_pop_flush_and_depth() {
+        unsafe {
+            #[repr(align(16))]
+            struct AlignedHeader([u64; 2]);
+            let mut header = AlignedHeader([0, 0]);
+            InitializeSListHead(header.0.as_mut_ptr());
+            assert_eq!(QueryDepthSList(header.0.as_ptr()), 0);
+            assert!(InterlockedPopEntrySList(header.0.as_mut_ptr()).is_null());
+
+            let mut node1: usize = 0;
+            let mut node2: usize = 0;
+            let mut node3: usize = 0;
+
+            assert!(InterlockedPushEntrySList(header.0.as_mut_ptr(), &mut node1).is_null());
+            assert_eq!(QueryDepthSList(header.0.as_ptr()), 1);
+
+            let prev = InterlockedPushEntrySList(header.0.as_mut_ptr(), &mut node2);
+            assert_eq!(prev, &mut node1 as *mut usize);
+            assert_eq!(QueryDepthSList(header.0.as_ptr()), 2);
+
+            let prev2 = InterlockedPushEntrySList(header.0.as_mut_ptr(), &mut node3);
+            assert_eq!(prev2, &mut node2 as *mut usize);
+            assert_eq!(QueryDepthSList(header.0.as_ptr()), 3);
+
+            assert_eq!(InterlockedPopEntrySList(header.0.as_mut_ptr()), &mut node3 as *mut usize);
+            assert_eq!(QueryDepthSList(header.0.as_ptr()), 2);
+
+            let flushed = InterlockedFlushSList(header.0.as_mut_ptr());
+            assert_eq!(flushed, &mut node2 as *mut usize);
+            assert_eq!(QueryDepthSList(header.0.as_ptr()), 0);
+            assert!(InterlockedPopEntrySList(header.0.as_mut_ptr()).is_null());
+        }
+    }
+
+    #[test]
+    fn test_get_logical_processor_information_ex() {
+        unsafe {
+            let mut len: u32 = 0;
+            let res = GetLogicalProcessorInformationEx(0, std::ptr::null_mut(), &mut len);
+            assert_eq!(res, 0);
+            assert_eq!(GetLastError(), 122); // ERROR_INSUFFICIENT_BUFFER
+            assert!(len >= 48);
+
+            let mut buf = vec![0u8; len as usize];
+            let res2 = GetLogicalProcessorInformationEx(0, buf.as_mut_ptr(), &mut len);
+            assert_eq!(res2, 1);
+            assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 0);
+            assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 48);
         }
     }
 }

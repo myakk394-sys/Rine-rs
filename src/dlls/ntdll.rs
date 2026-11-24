@@ -687,12 +687,13 @@ pub fn get_wine_unix_funcs_table() -> usize {
         return cached;
     }
 
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let candidate_dirs = [
-        "/home/fizzy/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/x86_64-unix",
-        "/home/fizzy/.local/share/Steam/steamapps/common/Proton 9.0 (Beta)/files/lib/wine/x86_64-unix",
-        "/home/fizzy/.local/share/Steam/steamapps/common/Proton 8.0/files/lib/wine/x86_64-unix",
-        "/usr/lib/wine/x86_64-unix",
-        "/usr/lib64/wine/x86_64-unix",
+        format!("{}/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/x86_64-unix", home),
+        format!("{}/.local/share/Steam/steamapps/common/Proton 9.0 (Beta)/files/lib/wine/x86_64-unix", home),
+        format!("{}/.local/share/Steam/steamapps/common/Proton 8.0/files/lib/wine/x86_64-unix", home),
+        "/usr/lib/wine/x86_64-unix".to_string(),
+        "/usr/lib64/wine/x86_64-unix".to_string(),
     ];
 
     for dir in &candidate_dirs {
