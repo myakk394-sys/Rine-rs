@@ -12,3 +12,6 @@ scratch/
 # Wine debug or local builds if any
 wine/
 
+
+# Debug markdown artifacts
+RINE_*.md
