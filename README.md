@@ -45,14 +45,15 @@ Unlike traditional Wine/Proton setups that rely on a mandatory `wineserver` daem
 
 #### 1. *How to Fish* (Unity 6 `6000.4.4f1`, 1920x1080, uncapped FPS, 700 MangoHud samples)
 
-| Metric | Rine Win64 Native | Proton Experimental |
-| :--- | :--- | :--- |
-| **Average FPS** | **136.26 FPS** | 129.31 FPS |
-| **Average Frame Time** | **8.27 ms** | 8.59 ms |
-| **1% Low FPS** | 55.52 FPS | **63.81 FPS** |
-| **p99 Frame Time** | 18.01 ms | **15.92 ms** |
-| **Average GPU Utilization** | **89.9%** | 99.4% |
-| **VRAM Usage** | **2,785 MB** | 3,273 MB |
+| Metric | Proton Experimental | Rine Win64 Native | Notes |
+| :--- | :--- | :--- | :--- |
+| **Average FPS** | 129.31 FPS | **136.26 FPS** | **+5.4% higher average FPS** |
+| **Peak FPS** | 893.54 FPS | **1,466.23 FPS** | **Higher peak throughput** |
+| **Average Frame Time** | 8.59 ms | **8.27 ms** | **Lower average frame time** |
+| **1% Low FPS** | **63.81 FPS** | 55.52 FPS | Proton slightly steadier on rare dips |
+| **p99 Frame Time** | **15.92 ms** | 18.01 ms | Slightly tighter p99 on Proton |
+| **Average GPU Utilization** | 99.4% | **89.9%** | **9.5% lower GPU load** |
+| **VRAM Usage** | 3,273 MB | **2,785 MB** | **Saves 488 MB VRAM** |
 
 #### 2. *Cuphead* (Unity Mono, 60-Second Gameplay Profile)
 
@@ -122,14 +123,15 @@ Licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See `LICENSE`.
 
 #### 1. *How to Fish* (Unity 6 `6000.4.4f1`, 1920x1080, без лимита FPS, 700 сэмплов MangoHud)
 
-| Метрика | Rine Win64 Native | Proton Experimental |
-| :--- | :--- | :--- |
-| **Средний FPS** | **136.26 FPS** | 129.31 FPS |
-| **Средний Frame time** | **8.27 мс** | 8.59 мс |
-| **1% low FPS** | 55.52 FPS | **63.81 FPS** |
-| **p99 Frame time** | 18.01 мс | **15.92 мс** |
-| **Нагрузка GPU** | **89.9%** | 99.4% |
-| **VRAM** | **2 785 МБ** | 3 273 МБ |
+| Метрика | Proton Experimental | Rine Win64 Native | Примечание |
+| :--- | :--- | :--- | :--- |
+| **Средний FPS** | 129.31 FPS | **136.26 FPS** | **На +5.4% выше средний FPS** |
+| **Пиковый FPS** | 893.54 FPS | **1 466.23 FPS** | **Выше пиковая пропускная способность** |
+| **Средний Frame time** | 8.59 мс | **8.27 мс** | **Ниже среднее время кадра** |
+| **1% low FPS** | **63.81 FPS** | 55.52 FPS | Proton чуть ровнее на редких просадках |
+| **p99 Frame time** | **15.92 мс** | 18.01 мс | Чуть ниже p99 у Proton |
+| **Нагрузка GPU** | 99.4% | **89.9%** | **На 9.5% меньше нагрузка на видеокарту** |
+| **VRAM** | 3 273 МБ | **2 785 МБ** | **Экономия 488 МБ видеопамяти** |
 
 #### 2. *Cuphead* (Unity Mono, 60-секундный замер геймплея)
 
