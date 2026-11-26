@@ -13,6 +13,155 @@ use std::path::{Path, PathBuf};
 // Binary format and architecture definitions
 // Определения форматов бинарных файлов и архитектур
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UnityGeneration {
+    Unknown = 0,
+    /// Unity 4.x / 5.x / 2017.x (classic CSteamworks / Steamworks.NET without ManualDispatch)
+    Unity5OrLegacy = 1,
+    /// Unity 2018.x .. 2023.x
+    Unity2018To2022 = 2,
+    /// Unity 6000+ (Unity 6)
+    Unity6Plus = 3,
+}
+
+impl UnityGeneration {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Unity5OrLegacy,
+            2 => Self::Unity2018To2022,
+            3 => Self::Unity6Plus,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+fn is_valid_unity_version_prefix(slice: &[u8]) -> bool {
+    if let Ok(s) = std::str::from_utf8(slice) {
+        let mut parts = s.split('.');
+        let Some(major_str) = parts.next() else { return false; };
+        let Some(minor_str) = parts.next() else { return false; };
+        if minor_str.is_empty() || !minor_str.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        matches!(major_str, "4" | "5")
+            || (major_str.len() == 4
+                && (major_str.starts_with("20") || major_str.starts_with("60"))
+                && major_str.bytes().all(|b| b.is_ascii_digit()))
+    } else {
+        false
+    }
+}
+
+/// Extract a Unity engine version string (e.g. "5.6.7f1", "2017.4.9f1", "6000.0.25f1")
+/// from the header bytes of `globalgamemanagers` or `mainData`.
+pub fn parse_unity_version_from_bytes(buf: &[u8]) -> Option<String> {
+    for pos in 0..buf.len() {
+        let b = buf[pos];
+        if !b.is_ascii_digit() {
+            continue;
+        }
+        // Only start on boundaries (preceded by NUL, control char, or start of buffer)
+        if pos > 0 && buf[pos - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        let end = buf[pos..]
+            .iter()
+            .position(|&c| c == 0 || c < 32 || c > 126)
+            .unwrap_or(buf.len() - pos);
+        if end < 5 || end > 32 {
+            continue;
+        }
+        let candidate = &buf[pos..pos + end];
+        // Check first two dot-separated components
+        if let Some(first_dot) = candidate.iter().position(|&c| c == b'.') {
+            if let Some(rel_second_dot) = candidate[first_dot + 1..].iter().position(|&c| c == b'.') {
+                let prefix = &candidate[..first_dot + 1 + rel_second_dot];
+                if is_valid_unity_version_prefix(prefix) {
+                    if let Ok(ver_str) = std::str::from_utf8(candidate) {
+                        return Some(ver_str.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect the Unity version string for a game executable from `<Game>_Data/globalgamemanagers`
+/// or `<Game>_Data/mainData` (Unity 5.0–5.2).
+pub fn detect_unity_version(exe_path: &Path) -> Option<String> {
+    let parent = exe_path.parent()?;
+    let stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let data_dir = parent.join(format!("{}_Data", stem));
+    let candidates = [
+        data_dir.join("globalgamemanagers"),
+        data_dir.join("mainData"),
+        parent.join("Data").join("globalgamemanagers"),
+        parent.join("Data").join("mainData"),
+    ];
+    for path in &candidates {
+        if let Ok(f) = fs::File::open(path) {
+            let mut buf = Vec::with_capacity(512);
+            if f.take(512).read_to_end(&mut buf).is_ok() {
+                if let Some(ver) = parse_unity_version_from_bytes(&buf) {
+                    return Some(ver);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Classify a Unity game executable into its engine generation so Steamworks license
+/// compatibility can select the matching API behavior (e.g. Unity 5/2017 vs Unity 6).
+pub fn detect_unity_generation(exe_path: &Path) -> (UnityGeneration, Option<String>) {
+    let parent = match exe_path.parent() {
+        Some(p) => p,
+        None => return (UnityGeneration::Unknown, None),
+    };
+    let stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let data_dir = parent.join(format!("{}_Data", stem));
+    let has_unity_player = parent.join("UnityPlayer.dll").exists()
+        || parent.join("unityplayer.dll").exists();
+    let has_unity_data = data_dir.exists()
+        || parent.join("Data").exists()
+        || parent.join("MonoBleedingEdge").exists()
+        || parent.join("GameAssembly.dll").exists();
+
+    if !has_unity_player && !has_unity_data {
+        return (UnityGeneration::Unknown, None);
+    }
+
+    let version = detect_unity_version(exe_path);
+    if let Some(ref ver) = version {
+        if let Some(major_str) = ver.split('.').next() {
+            if let Ok(major) = major_str.parse::<u32>() {
+                let gen = if major >= 6000 {
+                    UnityGeneration::Unity6Plus
+                } else if major >= 2018 {
+                    UnityGeneration::Unity2018To2022
+                } else {
+                    // 4.x, 5.x, 2017.x
+                    UnityGeneration::Unity5OrLegacy
+                };
+                return (gen, version);
+            }
+        }
+    }
+
+    // Fallback heuristics when version string isn't readable:
+    // Unity 5 often ships without UnityPlayer.dll or uses CSteamworks.dll in Plugins/.
+    let has_csteamworks = data_dir.join("Plugins").join("CSteamworks.dll").exists()
+        || data_dir.join("Plugins").join("x86_64").join("CSteamworks.dll").exists()
+        || parent.join("CSteamworks.dll").exists();
+    if has_csteamworks || !has_unity_player {
+        (UnityGeneration::Unity5OrLegacy, version)
+    } else {
+        (UnityGeneration::Unity2018To2022, version)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BinaryFormat {
     Pe32,      // Windows 32-bit PE
@@ -600,24 +749,7 @@ pub fn check_game_compatibility(exe_path: &Path) -> GameCompatibility {
         || parent.join("GameAssembly.dll").exists();
 
     if has_unity_player || has_unity_data {
-        // Read Unity version from globalgamemanagers if available
-        let mut unity_version = None;
-        let data_dir = parent.join(format!("{}_Data", stem));
-        let ggm_path = data_dir.join("globalgamemanagers");
-        if let Ok(mut f) = fs::File::open(&ggm_path) {
-            let mut buf = [0u8; 128];
-            if f.read_exact(&mut buf).is_ok() {
-                if let Some(pos) = buf.windows(4).position(|w| w.starts_with(b"20") || w.starts_with(b"60")) {
-                    let end = buf[pos..]
-                        .iter()
-                        .position(|&b| b == 0 || b < 32)
-                        .unwrap_or(buf.len() - pos);
-                    if let Ok(ver_str) = std::str::from_utf8(&buf[pos..pos + end]) {
-                        unity_version = Some(ver_str.to_string());
-                    }
-                }
-            }
-        }
+        let unity_version = detect_unity_version(exe_path);
 
         let engine = GameEngine::Unity {
             version: unity_version,

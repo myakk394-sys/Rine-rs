@@ -18,6 +18,7 @@ pub enum RegValue {
     Sz(String),
     Dword(u32),
     Binary(Vec<u8>),
+    Raw(u32, Vec<u8>),
 }
 
 impl RegValue {
@@ -26,6 +27,7 @@ impl RegValue {
             RegValue::Sz(_) => 1,     // REG_SZ
             RegValue::Binary(_) => 3, // REG_BINARY
             RegValue::Dword(_) => 4,  // REG_DWORD
+            RegValue::Raw(t, _) => *t,
         }
     }
 
@@ -38,7 +40,7 @@ impl RegValue {
                 v
             }
             RegValue::Dword(d) => d.to_le_bytes().to_vec(),
-            RegValue::Binary(b) => b.clone(),
+            RegValue::Binary(b) | RegValue::Raw(_, b) => b.clone(),
         }
     }
 
@@ -50,7 +52,7 @@ impl RegValue {
                 v
             }
             RegValue::Dword(d) => d.to_le_bytes().to_vec(),
-            RegValue::Binary(b) => b.clone(),
+            RegValue::Binary(b) | RegValue::Raw(_, b) => b.clone(),
         }
     }
 }
@@ -540,10 +542,13 @@ pub unsafe extern "win64" fn RegSetValueExW(
             RegValue::Sz(String::new())
         }
     } else if dw_type == 4 {
-        if !lp_data.is_null() && cb_data >= 4 {
+        if !lp_data.is_null() && cb_data == 4 {
             let mut arr = [0u8; 4];
             std::ptr::copy_nonoverlapping(lp_data, arr.as_mut_ptr(), 4);
             RegValue::Dword(u32::from_le_bytes(arr))
+        } else if !lp_data.is_null() && cb_data > 0 {
+            let data_vec = std::slice::from_raw_parts(lp_data, cb_data as usize).to_vec();
+            RegValue::Raw(4, data_vec)
         } else {
             RegValue::Dword(0)
         }
@@ -553,7 +558,11 @@ pub unsafe extern "win64" fn RegSetValueExW(
         } else {
             Vec::new()
         };
-        RegValue::Binary(data_vec)
+        if dw_type == 3 {
+            RegValue::Binary(data_vec)
+        } else {
+            RegValue::Raw(dw_type, data_vec)
+        }
     };
 
     println!("[ADVAPI32] RegSetValueExW: full_key='{}', val={:?}", full_key, val);
@@ -591,10 +600,13 @@ pub unsafe extern "win64" fn RegSetValueExA(
             RegValue::Sz(String::new())
         }
     } else if dw_type == 4 {
-        if !lp_data.is_null() && cb_data >= 4 {
+        if !lp_data.is_null() && cb_data == 4 {
             let mut arr = [0u8; 4];
             std::ptr::copy_nonoverlapping(lp_data, arr.as_mut_ptr(), 4);
             RegValue::Dword(u32::from_le_bytes(arr))
+        } else if !lp_data.is_null() && cb_data > 0 {
+            let data_vec = std::slice::from_raw_parts(lp_data, cb_data as usize).to_vec();
+            RegValue::Raw(4, data_vec)
         } else {
             RegValue::Dword(0)
         }
@@ -604,7 +616,11 @@ pub unsafe extern "win64" fn RegSetValueExA(
         } else {
             Vec::new()
         };
-        RegValue::Binary(data_vec)
+        if dw_type == 3 {
+            RegValue::Binary(data_vec)
+        } else {
+            RegValue::Raw(dw_type, data_vec)
+        }
     };
 
     println!("[ADVAPI32] RegSetValueExA: full_key='{}', val={:?}", full_key, val);
@@ -1425,6 +1441,41 @@ mod tests {
 
             assert_eq!(status, 0); // ERROR_SUCCESS
             assert_eq!(val_type, 1); // REG_SZ
+        }
+    }
+
+    #[test]
+    fn test_registry_unity_float_dword_8bytes() {
+        unsafe {
+            let val_name = b"test_music_float_h12345\0";
+            let expected_val: f64 = 0.75;
+            let bytes = expected_val.to_le_bytes();
+            let set_status = RegSetValueExA(
+                HKEY_CURRENT_USER,
+                val_name.as_ptr(),
+                0,
+                4, // REG_DWORD (Unity PlayerPrefs.SetFloat uses dwType=4, cbData=8)
+                bytes.as_ptr(),
+                bytes.len() as u32,
+            );
+            assert_eq!(set_status, 0);
+
+            let mut out_buf = [0u8; 16];
+            let mut out_size = 16u32;
+            let mut out_type = 0u32;
+            let query_status = RegQueryValueExA(
+                HKEY_CURRENT_USER,
+                val_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut out_type,
+                out_buf.as_mut_ptr(),
+                &mut out_size,
+            );
+            assert_eq!(query_status, 0);
+            assert_eq!(out_type, 4);
+            assert_eq!(out_size, 8);
+            let got = f64::from_le_bytes(out_buf[..8].try_into().unwrap());
+            assert_eq!(got, expected_val);
         }
     }
 }

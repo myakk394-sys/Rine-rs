@@ -6,12 +6,44 @@
 //! license verification checks (SteamAPI_RestartAppIfNecessary -> 0, BIsSubscribed -> 1),
 //! and maintains a full mock C++ vtable table so virtual interface calls succeed safely.
 
-use std::ffi::{c_char, c_void};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::ffi::{c_char, c_void, CStr};
+use std::path::Path;
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use crate::steam_scanner::{detect_unity_generation, UnityGeneration};
 
 static DEFAULT_STEAM_ID: u64 = 76561198763491797;
 static ACTIVE_APP_ID: AtomicU32 = AtomicU32::new(4001890);
+static DETECTED_UNITY_GENERATION: AtomicU8 = AtomicU8::new(UnityGeneration::Unknown as u8);
+
+pub fn set_unity_generation(gen: UnityGeneration) {
+    DETECTED_UNITY_GENERATION.store(gen as u8, Ordering::SeqCst);
+}
+
+pub fn get_unity_generation() -> UnityGeneration {
+    UnityGeneration::from_u8(DETECTED_UNITY_GENERATION.load(Ordering::SeqCst))
+}
+
+/// Inspect the target executable's Unity engine version and select the matching
+/// Steamworks license/API compatibility profile (Unity 5/2017 legacy vs Unity 6+).
+pub fn configure_unity_license_profile(exe_path: &Path) -> UnityGeneration {
+    let (gen, version) = detect_unity_generation(exe_path);
+    set_unity_generation(gen);
+    let ver_label = version.as_deref().unwrap_or("unknown");
+    let profile_desc = match gen {
+        UnityGeneration::Unity5OrLegacy => "Legacy Unity 4/5/2017 (CSteamworks / classic _Get interfaces)",
+        UnityGeneration::Unity2018To2022 => "Unity 2018-2022 (hybrid classic + ManualDispatch)",
+        UnityGeneration::Unity6Plus => "Unity 6+ (strict ManualDispatch / modern Steamworks.NET)",
+        UnityGeneration::Unknown => "Generic / non-Unity (default compatibility)",
+    };
+    println!(
+        "[RINE STEAM] Engine profile: version='{}' -> {}",
+        ver_label, profile_desc
+    );
+    gen
+}
 
 pub fn set_active_app_id(appid: u32) {
     ACTIVE_APP_ID.store(appid, Ordering::SeqCst);
@@ -613,6 +645,455 @@ pub unsafe extern "win64" fn SteamNetworking() -> *mut c_void {
     get_mock_steam_interface()
 }
 
+#[repr(C)]
+pub struct CallbackMsgT {
+    pub m_h_steam_user: i32,
+    pub m_i_callback: i32,
+    pub m_pub_param: *mut u8,
+    pub m_cub_param: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SteamAPICallCompletedT {
+    m_h_async_call: u64,
+    m_i_callback: i32,
+    m_cub_param: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LobbyCreatedT {
+    m_e_result: u32,
+    m_pad: u32,
+    m_ul_steam_id_lobby: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LobbyEnterT {
+    m_ul_steam_id_lobby: u64,
+    m_rgf_chat_permissions: u32,
+    m_b_locked: u8,
+    m_pad: [u8; 3],
+    m_e_chat_room_enter_response: u32,
+}
+
+#[derive(Clone)]
+struct LocalLobby {
+    owner: u64,
+    lobby_type: i32,
+    max_members: i32,
+    joinable: bool,
+    data: HashMap<String, String>,
+}
+
+static NEXT_API_CALL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1001);
+static PENDING_CALLBACKS: OnceLock<Mutex<std::collections::VecDeque<(i32, Vec<u8>)>>> =
+    OnceLock::new();
+static PENDING_CALL_RESULTS: OnceLock<Mutex<HashMap<u64, (i32, Vec<u8>, bool)>>> = OnceLock::new();
+static ACTIVE_MANUAL_CALLBACK_BUF: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
+static LOCAL_LOBBIES: OnceLock<Mutex<HashMap<u64, LocalLobby>>> = OnceLock::new();
+static LOBBY_DATA_CSTR_CACHE: OnceLock<Mutex<HashMap<(u64, String), std::ffi::CString>>> =
+    OnceLock::new();
+
+fn pending_callbacks() -> &'static Mutex<std::collections::VecDeque<(i32, Vec<u8>)>> {
+    PENDING_CALLBACKS.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+}
+
+fn pending_call_results() -> &'static Mutex<HashMap<u64, (i32, Vec<u8>, bool)>> {
+    PENDING_CALL_RESULTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn active_manual_cb_buf() -> &'static Mutex<Option<Vec<u8>>> {
+    ACTIVE_MANUAL_CALLBACK_BUF.get_or_init(|| Mutex::new(None))
+}
+
+fn local_lobbies() -> &'static Mutex<HashMap<u64, LocalLobby>> {
+    LOCAL_LOBBIES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lobby_cstr_cache() -> &'static Mutex<HashMap<(u64, String), std::ffi::CString>> {
+    LOBBY_DATA_CSTR_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+unsafe fn struct_to_bytes<T: Copy>(val: &T) -> Vec<u8> {
+    std::slice::from_raw_parts((val as *const T) as *const u8, std::mem::size_of::<T>()).to_vec()
+}
+
+unsafe fn enqueue_api_call_result<T: Copy>(i_callback: i32, payload: &T) -> u64 {
+    let h_call = NEXT_API_CALL_ID.fetch_add(1, Ordering::SeqCst);
+    let payload_bytes = struct_to_bytes(payload);
+    let cub_param = payload_bytes.len() as u32;
+    pending_call_results()
+        .lock()
+        .unwrap()
+        .insert(h_call, (i_callback, payload_bytes, false));
+    let completed = SteamAPICallCompletedT {
+        m_h_async_call: h_call,
+        m_i_callback: i_callback,
+        m_cub_param: cub_param,
+    };
+    pending_callbacks()
+        .lock()
+        .unwrap()
+        .push_back((703, struct_to_bytes(&completed))); // SteamAPICallCompleted_t = 703
+    h_call
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ManualDispatch_Init() {
+    println!("[RINE STEAM] ManualDispatch_Init()");
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ManualDispatch_RunFrame(_h_steam_pipe: i32) {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ManualDispatch_GetNextCallback(
+    h_steam_pipe: i32,
+    p_callback_msg: *mut CallbackMsgT,
+) -> u32 {
+    if p_callback_msg.is_null() {
+        return 0;
+    }
+    if let Some((i_cb, payload)) = pending_callbacks().lock().unwrap().pop_front() {
+        let len = payload.len() as i32;
+        let mut active = active_manual_cb_buf().lock().unwrap();
+        *active = Some(payload);
+        let ptr = active.as_mut().unwrap().as_mut_ptr();
+        (*p_callback_msg).m_h_steam_user = 1;
+        (*p_callback_msg).m_i_callback = i_cb;
+        (*p_callback_msg).m_pub_param = ptr;
+        (*p_callback_msg).m_cub_param = len;
+        println!(
+            "[RINE STEAM] ManualDispatch_GetNextCallback -> i_cb={}, cub={}",
+            i_cb, len
+        );
+        return 1;
+    }
+    if crate::dlls::steam_bridge::is_bridge_enabled() {
+        return crate::dlls::steam_bridge::steamclient64_Steam_BGetCallback(
+            h_steam_pipe,
+            p_callback_msg as *mut c_void,
+        ) as u32;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ManualDispatch_FreeLastCallback(h_steam_pipe: i32) {
+    let mut active = active_manual_cb_buf().lock().unwrap();
+    if active.is_some() {
+        *active = None;
+        return;
+    }
+    drop(active);
+    if crate::dlls::steam_bridge::is_bridge_enabled() {
+        crate::dlls::steam_bridge::steamclient64_Steam_FreeLastCallback(h_steam_pipe);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ManualDispatch_GetAPICallResult(
+    h_steam_pipe: i32,
+    h_steam_api_call: u64,
+    p_callback: *mut c_void,
+    cub_callback: i32,
+    i_callback_expected: i32,
+    pb_failed: *mut u8,
+) -> u32 {
+    if let Some((i_cb, payload, failed)) = pending_call_results().lock().unwrap().remove(&h_steam_api_call) {
+        println!(
+            "[RINE STEAM] GetAPICallResult(call={}, expected={}, actual={}, cub={}, payload_len={}, failed={})",
+            h_steam_api_call, i_callback_expected, i_cb, cub_callback, payload.len(), failed
+        );
+        if i_callback_expected != 0 && i_cb != i_callback_expected {
+            if !pb_failed.is_null() {
+                // C# Steamworks.NET marshals `out bool pbFailed` as 4-byte Win32 BOOL
+                std::ptr::write_unaligned(pb_failed as *mut u32, 1);
+            }
+            return 0;
+        }
+        if !p_callback.is_null() && cub_callback > 0 {
+            let copy_len = payload.len().min(cub_callback as usize);
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), p_callback as *mut u8, copy_len);
+        }
+        if !pb_failed.is_null() {
+            std::ptr::write_unaligned(pb_failed as *mut u32, if failed { 1 } else { 0 });
+        }
+        return 1;
+    }
+    if crate::dlls::steam_bridge::is_bridge_enabled() {
+        return crate::dlls::steam_bridge::steamclient64_Steam_GetAPICallResult(
+            h_steam_pipe,
+            h_steam_api_call,
+            p_callback,
+            cub_callback,
+            i_callback_expected,
+            pb_failed,
+        ) as u32;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_CreateLobby(
+    _this: *mut c_void,
+    e_lobby_type: i32,
+    c_max_members: i32,
+) -> u64 {
+    let owner = SteamAPI_ISteamUser_GetSteamID(std::ptr::null_mut());
+    let seq = NEXT_API_CALL_ID.load(Ordering::SeqCst);
+    // Universe=1 (Public), AccountType=8 (Chat), Instance=0xC0000 (Lobby | MMSLobby)
+    let lobby_id = 0x018C_0000_0000_0000u64 | (seq & 0xFFFF_FFFF);
+    local_lobbies().lock().unwrap().insert(
+        lobby_id,
+        LocalLobby {
+            owner,
+            lobby_type: e_lobby_type,
+            max_members: c_max_members.max(1),
+            joinable: true,
+            data: HashMap::new(),
+        },
+    );
+    let created = LobbyCreatedT {
+        m_e_result: 1, // k_EResultOK
+        m_pad: 0,
+        m_ul_steam_id_lobby: lobby_id,
+    };
+    let h_call = enqueue_api_call_result(513, &created); // LobbyCreated_t = 513
+    let entered = LobbyEnterT {
+        m_ul_steam_id_lobby: lobby_id,
+        m_rgf_chat_permissions: 0,
+        m_b_locked: 0,
+        m_pad: [0; 3],
+        m_e_chat_room_enter_response: 1, // k_EChatRoomEnterResponseSuccess
+    };
+    {
+        let mut q = pending_callbacks().lock().unwrap();
+        q.push_back((513, struct_to_bytes(&created))); // LobbyCreated_t = 513 (for Callback<LobbyCreated_t>)
+        q.push_back((504, struct_to_bytes(&entered))); // LobbyEnter_t = 504
+    }
+    println!(
+        "[RINE STEAM] CreateLobby(type={}, max={}) -> lobby=0x{:016X}, call={}",
+        e_lobby_type, c_max_members, lobby_id, h_call
+    );
+    h_call
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_JoinLobby(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+) -> u64 {
+    let entered = LobbyEnterT {
+        m_ul_steam_id_lobby: steam_id_lobby,
+        m_rgf_chat_permissions: 0,
+        m_b_locked: 0,
+        m_pad: [0; 3],
+        m_e_chat_room_enter_response: 1,
+    };
+    let h_call = enqueue_api_call_result(504, &entered);
+    pending_callbacks()
+        .lock()
+        .unwrap()
+        .push_back((504, struct_to_bytes(&entered)));
+    h_call
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_LeaveLobby(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+) {
+    println!("[RINE STEAM] LeaveLobby(0x{:016X})", steam_id_lobby);
+    local_lobbies().lock().unwrap().remove(&steam_id_lobby);
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_SetLobbyData(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+    pch_key: *const c_char,
+    pch_value: *const c_char,
+) -> u8 {
+    if pch_key.is_null() || pch_value.is_null() {
+        return 0;
+    }
+    let key = CStr::from_ptr(pch_key).to_string_lossy().into_owned();
+    let val = CStr::from_ptr(pch_value).to_string_lossy().into_owned();
+    println!(
+        "[RINE STEAM] SetLobbyData(0x{:016X}, '{}', '{}')",
+        steam_id_lobby, key, val
+    );
+    lobby_cstr_cache()
+        .lock()
+        .unwrap()
+        .remove(&(steam_id_lobby, key.clone()));
+    if let Some(lobby) = local_lobbies().lock().unwrap().get_mut(&steam_id_lobby) {
+        lobby.data.insert(key, val);
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_GetLobbyData(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+    pch_key: *const c_char,
+) -> *const c_char {
+    if pch_key.is_null() {
+        return b"\0".as_ptr() as *const c_char;
+    }
+    let key = CStr::from_ptr(pch_key).to_string_lossy().into_owned();
+    let val_opt = local_lobbies()
+        .lock()
+        .unwrap()
+        .get(&steam_id_lobby)
+        .and_then(|l| l.data.get(&key).cloned());
+    println!(
+        "[RINE STEAM] GetLobbyData(0x{:016X}, '{}') -> {:?}",
+        steam_id_lobby, key, val_opt
+    );
+    if let Some(val) = val_opt {
+        if let Ok(cstr) = std::ffi::CString::new(val) {
+            let mut cache = lobby_cstr_cache().lock().unwrap();
+            let entry = cache.entry((steam_id_lobby, key)).or_insert(cstr);
+            return entry.as_ptr();
+        }
+    }
+    b"\0".as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_DeleteLobbyData(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+    pch_key: *const c_char,
+) -> u8 {
+    if !pch_key.is_null() {
+        let key = CStr::from_ptr(pch_key).to_string_lossy().into_owned();
+        lobby_cstr_cache()
+            .lock()
+            .unwrap()
+            .remove(&(steam_id_lobby, key.clone()));
+        if let Some(lobby) = local_lobbies().lock().unwrap().get_mut(&steam_id_lobby) {
+            lobby.data.remove(&key);
+        }
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_GetLobbyOwner(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+) -> u64 {
+    local_lobbies()
+        .lock()
+        .unwrap()
+        .get(&steam_id_lobby)
+        .map(|l| l.owner)
+        .unwrap_or_else(|| SteamAPI_ISteamUser_GetSteamID(std::ptr::null_mut()))
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_SetLobbyOwner(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+    steam_id_new_owner: u64,
+) -> u8 {
+    if let Some(lobby) = local_lobbies().lock().unwrap().get_mut(&steam_id_lobby) {
+        lobby.owner = steam_id_new_owner;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_GetNumLobbyMembers(
+    _this: *mut c_void,
+    _steam_id_lobby: u64,
+) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+    i_member: i32,
+) -> u64 {
+    if i_member == 0 {
+        SteamAPI_ISteamMatchmaking_GetLobbyOwner(_this, steam_id_lobby)
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_SetLobbyType(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+    e_lobby_type: i32,
+) -> u8 {
+    if let Some(lobby) = local_lobbies().lock().unwrap().get_mut(&steam_id_lobby) {
+        lobby.lobby_type = e_lobby_type;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_SetLobbyJoinable(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+    b_joinable: u8,
+) -> u8 {
+    if let Some(lobby) = local_lobbies().lock().unwrap().get_mut(&steam_id_lobby) {
+        lobby.joinable = b_joinable != 0;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+    c_max_members: i32,
+) -> u8 {
+    if let Some(lobby) = local_lobbies().lock().unwrap().get_mut(&steam_id_lobby) {
+        lobby.max_members = c_max_members;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit(
+    _this: *mut c_void,
+    steam_id_lobby: u64,
+) -> i32 {
+    local_lobbies()
+        .lock()
+        .unwrap()
+        .get(&steam_id_lobby)
+        .map(|l| l.max_members)
+        .unwrap_or(8)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_RequestLobbyData(
+    _this: *mut c_void,
+    _steam_id_lobby: u64,
+) -> u8 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamMatchmaking_RequestLobbyList(_this: *mut c_void) -> u64 {
+    let empty_count: u32 = 0;
+    enqueue_api_call_result(510, &empty_count) // LobbyMatchList_t = 510
+}
+
 #[no_mangle]
 pub unsafe extern "win64" fn SteamMatchmaking() -> *mut c_void {
     get_mock_steam_interface()
@@ -656,6 +1137,153 @@ pub unsafe extern "win64" fn SteamNetworkingUtils() -> *mut c_void {
 #[no_mangle]
 pub unsafe extern "win64" fn SteamNetworkingSockets() -> *mut c_void {
     get_mock_steam_interface()
+}
+
+static NEXT_LISTEN_SOCKET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static NEXT_NET_CONNECTION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static NEXT_POLL_GROUP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P(
+    _this: *mut c_void,
+    n_local_virtual_port: i32,
+    _n_options: i32,
+    _p_options: *const c_void,
+) -> u32 {
+    let sock = NEXT_LISTEN_SOCKET.fetch_add(1, Ordering::SeqCst);
+    println!(
+        "[RINE STEAM] CreateListenSocketP2P(port={}) -> {}",
+        n_local_virtual_port, sock
+    );
+    sock
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_CloseListenSocket(
+    _this: *mut c_void,
+    _h_socket: u32,
+) -> u8 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_ConnectP2P(
+    _this: *mut c_void,
+    _identity_remote: *const c_void,
+    _n_remote_virtual_port: i32,
+    _n_options: i32,
+    _p_options: *const c_void,
+) -> u32 {
+    NEXT_NET_CONNECTION.fetch_add(1, Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_AcceptConnection(
+    _this: *mut c_void,
+    _h_conn: u32,
+) -> i32 {
+    1 // k_EResultOK
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_CloseConnection(
+    _this: *mut c_void,
+    _h_conn: u32,
+    _n_reason: i32,
+    _psz_debug: *const c_char,
+    _b_enable_linger: u8,
+) -> u8 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_CreatePollGroup(
+    _this: *mut c_void,
+) -> u32 {
+    NEXT_POLL_GROUP.fetch_add(1, Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_DestroyPollGroup(
+    _this: *mut c_void,
+    _h_poll_group: u32,
+) -> u8 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_SetConnectionPollGroup(
+    _this: *mut c_void,
+    _h_conn: u32,
+    _h_poll_group: u32,
+) -> u8 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection(
+    _this: *mut c_void,
+    _h_conn: u32,
+    _pp_out_messages: *mut *mut c_void,
+    _n_max_messages: i32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnPollGroup(
+    _this: *mut c_void,
+    _h_poll_group: u32,
+    _pp_out_messages: *mut *mut c_void,
+    _n_max_messages: i32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_SendMessageToConnection(
+    _this: *mut c_void,
+    _h_conn: u32,
+    _p_data: *const c_void,
+    _cb_data: u32,
+    _n_send_flags: i32,
+    p_out_message_number: *mut i64,
+) -> i32 {
+    if !p_out_message_number.is_null() {
+        *p_out_message_number = 1;
+    }
+    1 // k_EResultOK
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_FlushMessagesOnConnection(
+    _this: *mut c_void,
+    _h_conn: u32,
+) -> i32 {
+    1 // k_EResultOK
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_RunCallbacks(_this: *mut c_void) {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_GetConnectionInfo(
+    _this: *mut c_void,
+    _h_conn: u32,
+    _p_info: *mut c_void,
+) -> u8 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SteamAPI_ISteamNetworkingSockets_ConfigureConnectionLanes(
+    _this: *mut c_void,
+    _h_conn: u32,
+    _n_num_lanes: i32,
+    _p_lane_priorities: *const i32,
+    _p_lane_weights: *const u16,
+) -> i32 {
+    1 // k_EResultOK
 }
 
 #[no_mangle]
@@ -1599,7 +2227,9 @@ pub fn resolve_steam_symbol(fn_name: &str) -> Option<usize> {
         "SteamAPI_GetHSteamPipe" | "Steam_GetHSteamPipe" => {
             Some(SteamAPI_GetHSteamPipe as *const () as usize)
         }
-        "SteamAPI_GetHSteamUser" | "Steam_GetHSteamUser" => {
+        "SteamAPI_GetHSteamUser"
+        | "Steam_GetHSteamUser"
+        | "Steam_GetHSteamUserCurrent" => {
             Some(SteamAPI_GetHSteamUser as *const () as usize)
         }
         "SteamAPI_GetSteamInstallPath" => {
@@ -1643,6 +2273,51 @@ pub fn resolve_steam_symbol(fn_name: &str) -> Option<usize> {
         }
         "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus" => {
             Some(SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P" => {
+            Some(SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_CloseListenSocket" => {
+            Some(SteamAPI_ISteamNetworkingSockets_CloseListenSocket as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_ConnectP2P" => {
+            Some(SteamAPI_ISteamNetworkingSockets_ConnectP2P as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_AcceptConnection" => {
+            Some(SteamAPI_ISteamNetworkingSockets_AcceptConnection as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_CloseConnection" => {
+            Some(SteamAPI_ISteamNetworkingSockets_CloseConnection as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_CreatePollGroup" => {
+            Some(SteamAPI_ISteamNetworkingSockets_CreatePollGroup as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_DestroyPollGroup" => {
+            Some(SteamAPI_ISteamNetworkingSockets_DestroyPollGroup as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_SetConnectionPollGroup" => {
+            Some(SteamAPI_ISteamNetworkingSockets_SetConnectionPollGroup as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection" => {
+            Some(SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnPollGroup" => {
+            Some(SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnPollGroup as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_SendMessageToConnection" => {
+            Some(SteamAPI_ISteamNetworkingSockets_SendMessageToConnection as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_FlushMessagesOnConnection" => {
+            Some(SteamAPI_ISteamNetworkingSockets_FlushMessagesOnConnection as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_RunCallbacks" => {
+            Some(SteamAPI_ISteamNetworkingSockets_RunCallbacks as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_GetConnectionInfo" => {
+            Some(SteamAPI_ISteamNetworkingSockets_GetConnectionInfo as *const () as usize)
+        }
+        "SteamAPI_ISteamNetworkingSockets_ConfigureConnectionLanes" => {
+            Some(SteamAPI_ISteamNetworkingSockets_ConfigureConnectionLanes as *const () as usize)
         }
 
         // Flat ISteamApps
@@ -1937,15 +2612,81 @@ pub fn resolve_steam_symbol(fn_name: &str) -> Option<usize> {
             Some(get_mock_remotestorage_interface as *const () as usize)
         }
 
+        // ManualDispatch API (used by modern Steamworks.NET / Heathen)
+        "SteamAPI_ManualDispatch_Init" => Some(SteamAPI_ManualDispatch_Init as *const () as usize),
+        "SteamAPI_ManualDispatch_RunFrame" => {
+            Some(SteamAPI_ManualDispatch_RunFrame as *const () as usize)
+        }
+        "SteamAPI_ManualDispatch_GetNextCallback" => {
+            Some(SteamAPI_ManualDispatch_GetNextCallback as *const () as usize)
+        }
+        "SteamAPI_ManualDispatch_FreeLastCallback" => {
+            Some(SteamAPI_ManualDispatch_FreeLastCallback as *const () as usize)
+        }
+        "SteamAPI_ManualDispatch_GetAPICallResult" => {
+            Some(SteamAPI_ManualDispatch_GetAPICallResult as *const () as usize)
+        }
+
+        // Matchmaking API
+        "SteamAPI_ISteamMatchmaking_CreateLobby" => {
+            Some(SteamAPI_ISteamMatchmaking_CreateLobby as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_JoinLobby" => {
+            Some(SteamAPI_ISteamMatchmaking_JoinLobby as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_LeaveLobby" => {
+            Some(SteamAPI_ISteamMatchmaking_LeaveLobby as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_SetLobbyData" => {
+            Some(SteamAPI_ISteamMatchmaking_SetLobbyData as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_GetLobbyData" => {
+            Some(SteamAPI_ISteamMatchmaking_GetLobbyData as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_DeleteLobbyData" => {
+            Some(SteamAPI_ISteamMatchmaking_DeleteLobbyData as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_GetLobbyOwner" => {
+            Some(SteamAPI_ISteamMatchmaking_GetLobbyOwner as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_SetLobbyOwner" => {
+            Some(SteamAPI_ISteamMatchmaking_SetLobbyOwner as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers" => {
+            Some(SteamAPI_ISteamMatchmaking_GetNumLobbyMembers as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex" => {
+            Some(SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_SetLobbyType" => {
+            Some(SteamAPI_ISteamMatchmaking_SetLobbyType as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_SetLobbyJoinable" => {
+            Some(SteamAPI_ISteamMatchmaking_SetLobbyJoinable as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit" => {
+            Some(SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit" => {
+            Some(SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_RequestLobbyData" => {
+            Some(SteamAPI_ISteamMatchmaking_RequestLobbyData as *const () as usize)
+        }
+        "SteamAPI_ISteamMatchmaking_RequestLobbyList" => {
+            Some(SteamAPI_ISteamMatchmaking_RequestLobbyList as *const () as usize)
+        }
+
         // Prefix fallback for older Unity / CSteamworks flat functions (e.g. ISteamApps_BIsSubscribed)
         name if name.starts_with("ISteam") => {
             let prefixed = format!("SteamAPI_{}", name);
             if let Some(ptr) = resolve_steam_symbol(&prefixed) {
                 return Some(ptr);
             }
+            let allow_broad_get = get_unity_generation() != UnityGeneration::Unity6Plus;
             if name.contains("IsSubscribed") || name.contains("BIs") || name.contains("Installed") {
                 Some(steam_generic_true_stub as *const () as usize)
-            } else if name.contains("_GetISteam") || name.contains("_Get") {
+            } else if name.contains("_GetISteam") || (allow_broad_get && name.contains("_Get")) {
                 Some(get_mock_steam_interface as *const () as usize)
             } else {
                 Some(steam_generic_stub as *const () as usize)
@@ -1960,6 +2701,7 @@ pub fn resolve_steam_symbol(fn_name: &str) -> Option<usize> {
                 || other.starts_with("SteamClient_")
                 || other.starts_with("ISteam")
             {
+                let allow_broad_get = get_unity_generation() != UnityGeneration::Unity6Plus;
                 if other.contains("Init")
                     || other.contains("IsSubscribed")
                     || other.contains("IsLogged")
@@ -1967,7 +2709,7 @@ pub fn resolve_steam_symbol(fn_name: &str) -> Option<usize> {
                     || other.contains("IsSteamRunning")
                 {
                     Some(steam_generic_true_stub as *const () as usize)
-                } else if other.contains("_Get") {
+                } else if other.contains("_GetISteam") || (allow_broad_get && other.contains("_Get")) {
                     Some(get_mock_steam_interface as *const () as usize)
                 } else {
                     Some(steam_generic_stub as *const () as usize)
@@ -2036,6 +2778,131 @@ mod tests {
                 test_filename.as_ptr(),
             );
             assert_eq!(exists_after, 0, "FileExists must return 0 after delete");
+        }
+    }
+
+    #[test]
+    fn test_unity_generation_steam_license_profiles() {
+        assert_eq!(
+            crate::steam_scanner::parse_unity_version_from_bytes(b"\0\0\0\x145.6.7f1\0"),
+            Some("5.6.7f1".to_string())
+        );
+        assert_eq!(
+            crate::steam_scanner::parse_unity_version_from_bytes(b"\0\0\x142017.4.9f1\0"),
+            Some("2017.4.9f1".to_string())
+        );
+        assert_eq!(
+            crate::steam_scanner::parse_unity_version_from_bytes(b"\0\0\x146000.0.25f1\0"),
+            Some("6000.0.25f1".to_string())
+        );
+
+        let generic_stub = steam_generic_stub as *const () as usize;
+        let mock_iface = get_mock_steam_interface as *const () as usize;
+        let huser_fn = SteamAPI_GetHSteamUser as *const () as usize;
+        let manual_next_fn = SteamAPI_ManualDispatch_GetNextCallback as *const () as usize;
+
+        set_unity_generation(UnityGeneration::Unity5OrLegacy);
+        assert_eq!(resolve_steam_symbol("Steam_GetHSteamUserCurrent"), Some(huser_fn));
+        assert_eq!(resolve_steam_symbol("SteamAPI_ISteamLegacy_GetCustomPtr"), Some(mock_iface));
+        assert_eq!(resolve_steam_symbol("SteamAPI_ManualDispatch_GetNextCallback"), Some(manual_next_fn));
+
+        set_unity_generation(UnityGeneration::Unity6Plus);
+        assert_eq!(resolve_steam_symbol("Steam_GetHSteamUserCurrent"), Some(huser_fn));
+        assert_eq!(resolve_steam_symbol("SteamAPI_ISteamLegacy_GetCustomPtr"), Some(generic_stub));
+        assert_eq!(resolve_steam_symbol("SteamAPI_ManualDispatch_GetNextCallback"), Some(manual_next_fn));
+
+        set_unity_generation(UnityGeneration::Unknown);
+    }
+
+    #[test]
+    fn test_steam_matchmaking_create_lobby_manual_dispatch() {
+        unsafe {
+            let h_call = SteamAPI_ISteamMatchmaking_CreateLobby(std::ptr::null_mut(), 0, 4);
+            assert_ne!(h_call, 0);
+
+            let mut msg = CallbackMsgT {
+                m_h_steam_user: 0,
+                m_i_callback: 0,
+                m_pub_param: std::ptr::null_mut(),
+                m_cub_param: 0,
+            };
+            assert_eq!(SteamAPI_ManualDispatch_GetNextCallback(1, &mut msg), 1);
+            assert_eq!(msg.m_i_callback, 703); // SteamAPICallCompleted_t
+            assert_eq!(msg.m_cub_param, 16);
+
+            let mut lobby_created = LobbyCreatedT {
+                m_e_result: 0,
+                m_pad: 0,
+                m_ul_steam_id_lobby: 0,
+            };
+            let mut failed: u32 = 0x1234_5678;
+            assert_eq!(
+                SteamAPI_ManualDispatch_GetAPICallResult(
+                    1,
+                    h_call,
+                    &mut lobby_created as *mut _ as *mut c_void,
+                    std::mem::size_of::<LobbyCreatedT>() as i32,
+                    513,
+                    &mut failed as *mut u32 as *mut u8,
+                ),
+                1
+            );
+            assert_eq!(failed, 0);
+            assert_eq!(lobby_created.m_e_result, 1);
+            assert_ne!(lobby_created.m_ul_steam_id_lobby, 0);
+            SteamAPI_ManualDispatch_FreeLastCallback(1);
+
+            // Next callback should be LobbyCreated_t (513) for Callback<LobbyCreated_t>
+            assert_eq!(SteamAPI_ManualDispatch_GetNextCallback(1, &mut msg), 1);
+            assert_eq!(msg.m_i_callback, 513);
+            assert_eq!(msg.m_cub_param, 16);
+            let cb_created = *(msg.m_pub_param as *const LobbyCreatedT);
+            assert_eq!(cb_created.m_e_result, 1);
+            assert_eq!(cb_created.m_ul_steam_id_lobby, lobby_created.m_ul_steam_id_lobby);
+            SteamAPI_ManualDispatch_FreeLastCallback(1);
+
+            // Next callback should be LobbyEnter_t (504)
+            assert_eq!(SteamAPI_ManualDispatch_GetNextCallback(1, &mut msg), 1);
+            assert_eq!(msg.m_i_callback, 504);
+            SteamAPI_ManualDispatch_FreeLastCallback(1);
+
+            // SetLobbyData & GetLobbyData (including overwrite invalidating CStr cache)
+            let lobby_id = lobby_created.m_ul_steam_id_lobby;
+            assert_eq!(
+                SteamAPI_ISteamMatchmaking_SetLobbyData(
+                    std::ptr::null_mut(),
+                    lobby_id,
+                    b"version\0".as_ptr() as *const c_char,
+                    b"1.0\0".as_ptr() as *const c_char,
+                ),
+                1
+            );
+            let v1 = CStr::from_ptr(SteamAPI_ISteamMatchmaking_GetLobbyData(
+                std::ptr::null_mut(),
+                lobby_id,
+                b"version\0".as_ptr() as *const c_char,
+            ))
+            .to_string_lossy()
+            .into_owned();
+            assert_eq!(v1, "1.0");
+
+            assert_eq!(
+                SteamAPI_ISteamMatchmaking_SetLobbyData(
+                    std::ptr::null_mut(),
+                    lobby_id,
+                    b"version\0".as_ptr() as *const c_char,
+                    b"2.0\0".as_ptr() as *const c_char,
+                ),
+                1
+            );
+            let v2 = CStr::from_ptr(SteamAPI_ISteamMatchmaking_GetLobbyData(
+                std::ptr::null_mut(),
+                lobby_id,
+                b"version\0".as_ptr() as *const c_char,
+            ))
+            .to_string_lossy()
+            .into_owned();
+            assert_eq!(v2, "2.0");
         }
     }
 }

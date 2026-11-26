@@ -580,15 +580,19 @@ impl RineNativeApp {
     }
 
     pub fn run() -> eframe::Result<()> {
+        let mut viewport = egui::ViewportBuilder::default()
+            .with_title("Rine Win64 Engine - Панель управления и лаунчер")
+            .with_app_id("rine")
+            .with_inner_size([880.0, 680.0])
+            .with_min_inner_size([640.0, 520.0])
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_resizable(true);
+        if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo.png")) {
+            viewport = viewport.with_icon(std::sync::Arc::new(icon));
+        }
         let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_title("Rine Win64 Engine - Панель управления и лаунчер")
-                .with_app_id("rine-gui")
-                .with_inner_size([880.0, 680.0])
-                .with_min_inner_size([640.0, 520.0])
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_resizable(true),
+            viewport,
             ..Default::default()
         };
 

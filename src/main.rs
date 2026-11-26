@@ -7,10 +7,11 @@ use std::process::exit;
 fn main() {
     let args: Vec<String> = env::args().collect();
     println!("[RINE ENGINE] Initializing Rine Win64 PE Execution Engine v0.2.0...");
-    std::env::set_var("DXVK_LOG_LEVEL", "debug");
-    std::env::set_var("DXVK_LOG_PATH", "/tmp");
-    if std::env::var("DXVK_CONFIG").is_err() {
-        std::env::set_var("DXVK_CONFIG", "dxgi.syncInterval = 1");
+    if std::env::var_os("DXVK_LOG_LEVEL").is_none() {
+        std::env::set_var("DXVK_LOG_LEVEL", "warn");
+    }
+    if std::env::var_os("DXVK_LOG_PATH").is_none() {
+        std::env::set_var("DXVK_LOG_PATH", "/tmp");
     }
     rine::sys::setup_signal_handlers();
     rine::windowing::x11::ensure_x11_environment();
@@ -41,6 +42,7 @@ fn main() {
     let mut wine_dll_path: Option<std::path::PathBuf> = None;
     let mut working_dir: Option<String> = None;
     let mut custom_appid: Option<String> = None;
+    let mut steam_offline = false;
     let allowed_modules: Vec<String> = vec![
         "version.dll".into(),
         "avrt.dll".into(),
@@ -88,6 +90,9 @@ fn main() {
                     custom_appid = Some(args[i + 1].clone());
                     i += 1;
                 }
+            }
+            "--steam-offline" => {
+                steam_offline = true;
             }
             "--ram-only" => {
                 strategy = StorageStrategy::RamOnly {
@@ -186,6 +191,14 @@ fn main() {
     };
     rine::dlls::kernel32::set_guest_command_line(&full_guest_cmd);
     println!("[RINE GUEST CMDLINE] Set guest command line: {}", full_guest_cmd);
+
+    // Detect Unity engine generation and select the matching Steam license/API profile
+    // before initializing the Steamworks bridge.
+    rine::dlls::steam::configure_unity_license_profile(Path::new(exe_path));
+
+    // Initialize native Steam bridge (loads real steam_api64.dll + steamclient.so if present,
+    // or warns if original steam_api64.dll is missing)
+    rine::dlls::steam_bridge::init_steam_bridge(exe_path, steam_offline);
 
     // Configure Steam environment if present
     let exe_parent = Path::new(exe_path).parent();

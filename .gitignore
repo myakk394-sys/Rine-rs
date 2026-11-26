@@ -15,3 +15,7 @@ wine/
 
 # Debug markdown artifacts
 RINE_*.md
+
+# Temporary python analysis scripts and build distributions
+*.py
+dist/

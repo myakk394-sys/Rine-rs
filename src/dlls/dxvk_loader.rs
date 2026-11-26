@@ -62,16 +62,25 @@ fn ensure_standalone_dxvk_deployed(source_dir: &str) {
         _ => return,
     };
     let target_dir = std::path::PathBuf::from(format!("{}/.local/share/rine/dxvk", home));
-    if target_dir.join("dxgi.dll").exists() && target_dir.join("d3d11.dll").exists() {
+    let cache_dir = std::path::PathBuf::from(format!("{}/.local/share/rine/cache/dxvk", home));
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let dlls_exist = target_dir.join("dxgi.dll").exists() && target_dir.join("d3d11.dll").exists();
+    let conf_exists = target_dir.join("dxvk.conf").exists();
+    if dlls_exist && conf_exists {
         return;
     }
     if std::fs::create_dir_all(&target_dir).is_ok() {
         if let Ok(entries) = std::fs::read_dir(source_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("dll") {
+                let ext = path.extension().and_then(|e| e.to_str());
+                if ext == Some("dll") || ext == Some("conf") {
                     if let Some(name) = path.file_name() {
-                        let _ = std::fs::copy(&path, target_dir.join(name));
+                        let dest = target_dir.join(name);
+                        if !dest.exists() {
+                            let _ = std::fs::copy(&path, dest);
+                        }
                     }
                 }
             }
@@ -107,6 +116,17 @@ pub fn find_dxvk_path() -> Option<&'static str> {
             if p.exists() && p.join("dxgi.dll").exists() && p.join("d3d11.dll").exists() {
                 if path.ends_with("assets/dxvk") {
                     ensure_standalone_dxvk_deployed(&path);
+                }
+                let conf_path = p.join("dxvk.conf");
+                if conf_path.is_file() && std::env::var_os("DXVK_CONFIG_FILE").is_none() {
+                    std::env::set_var("DXVK_CONFIG_FILE", &conf_path);
+                }
+                if std::env::var_os("DXVK_STATE_CACHE_PATH").is_none() {
+                    if let Ok(home) = std::env::var("HOME") {
+                        let cache_dir = format!("{}/.local/share/rine/cache/dxvk", home);
+                        let _ = std::fs::create_dir_all(&cache_dir);
+                        std::env::set_var("DXVK_STATE_CACHE_PATH", &cache_dir);
+                    }
                 }
                 println!("[DXVK LOADER] Found DXVK at: {}", path);
                 return path;

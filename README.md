@@ -5,12 +5,12 @@
 <h1 align="center">Rine-rs</h1>
 
 <p align="center">
-  <b>Rine Is Not an Emulator. Win64 compatibility runtime built from scratch in Rust.</b>
+  <b>Rine Is Not an Emulator. Lightweight in-process Win64 compatibility runtime built from scratch in Rust.</b>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="GPL-3.0 License"/>
-  <img src="https://img.shields.io/badge/Status-Early_Experimental_Build-orange.svg" alt="Project Status"/>
+  <img src="https://img.shields.io/badge/Status-Active_Experimental_Build-orange.svg" alt="Project Status"/>
   <img src="https://img.shields.io/badge/Architecture-x86__64_In--Process-informational.svg" alt="Architecture"/>
 </p>
 
@@ -23,161 +23,149 @@
 <a name="english"></a>
 ## English
 
-> **Notice:** Rine is currently in an **early experimental stage**. It is an active proof-of-concept compatibility layer, tested against a limited selection of target games.
+> **Notice:** Rine is in an **active experimental stage**. It is a fast, native in-process Win64 compatibility layer for Linux x86_64, actively tested on real Godot, Unity (Mono), and Unity 6 games.
 
 ### Overview
 
-**Rine** (*Rine is Not an Emulator*) is an in-process Win64 execution environment and Windows API translation layer written from scratch in Rust for Linux x86_64 systems under the **GNU General Public License v3.0 (GPL-3.0)**.
+**Rine** (*Rine Is Not an Emulator*) is an in-process Win64 execution environment and Windows API translation layer written from scratch in Rust for Linux x86_64 systems under the **GNU General Public License v3.0 (GPL-3.0)**.
 
-Unlike traditional Wine/Proton setups that rely on a mandatory central `wineserver` daemon and a web of auxiliary background processes, Rine executes guest Windows PE binaries directly inside the host process's memory space by default. Win32 API calls are mapped directly onto native Linux kernel primitives (`futex`, `mmap`, POSIX I/O) and hardware thread registers via `arch_prctl`, eliminating IPC overhead and scheduling latency for single-process games. (An optional lightweight `rineserver` IPC module is also included in the codebase for multi-process descriptor sharing when needed.)
+Unlike traditional Wine/Proton setups that rely on a mandatory `wineserver` daemon and dozens of auxiliary processes, Rine executes guest Windows PE binaries directly inside a single host process's address space by default. Win32 API calls map straight to native Linux kernel primitives (`futex`, `mmap`, POSIX I/O) and hardware TLS/TEB registers via `arch_prctl`, eliminating daemon IPC overhead. (An optional lightweight `rineserver` module is also available for multi-process descriptor sharing.)
 
-### API Coverage: Implemented vs. Registered Stubs
+### Key Capabilities
 
-To maintain full transparency about project scope:
-- **Actively Implemented Native Subsystems (~2,000+ APIs):** Hand-crafted Rust implementations covering core `KERNEL32`, `NTDLL`, `USER32`, `GDI32`, `ADVAPI32`, `WS2_32`, `OLE32`, `WASAPI` (PipeWire/PulseAudio), PE32+ loading, and Vulkan/DXVK bridging.
-- **Registered IAT Stubs (~650+ DLL modules):** Auto-generated export tables and safe dynamic fallback stubs (`[RINE UNRESOLVED BIND]`) that prevent immediate crashes on unimplemented secondary imports and log missing symbols for targeted development.
+- **In-Process Win64 Runtime & PE32+ Loader:** Parses PE sections, applies base relocations, resolves IAT/delay-load imports, executes TLS callbacks and MSVC `_initterm` initializers, and maps `PEB64`/`TEB64` with `GS Base` via `arch_prctl`.
+- **Win64 SEH, Vectored Exceptions & `longjmp` Unwinding:** Native `RtlAddFunctionTable` / `RtlAddGrowableFunctionTable`, `RtlCaptureContext`, `RtlRestoreContext` (including `STATUS_LONGJUMP`), `RtlUnwind`, and `RtlUnwindEx` supporting Mono/Unity JIT and C runtime unwinding.
+- **Direct Vulkan Bridge & Standalone DXVK:** Translates `vkCreateWin32SurfaceKHR` to X11/XWayland/SDL2 and loads standalone DXVK (`~/.local/share/rine/dxvk/`) to run Direct3D 9/10/11 over Vulkan without Proton or Wine installed.
+- **Native Desktop Launcher (`--gui`) & Overlay (`--overlay`):** Built-in `eframe`/`egui` launcher with Steam library scanning, prefix management, FPS limiter, and desktop integration (`install.sh`).
+- **Steamworks Bridge & Matchmaking / Networking:** Hybrid Steamworks layer (`steam_api64.dll` -> native Linux `steamclient.so`) with SteamStub 3.1 unpacking, `SteamAPI_ManualDispatch` (`703` CallResults + raw callbacks), local `ISteamMatchmaking` lobbies, and `ISteamNetworkingSockets` / `ISteamNetworkingUtils` P2P/Relay support.
+- **Win32 NLS, Registry & Persistence:** Full Win32 locale/NLS tables (`IsValidLocaleName`, `GetLocaleInfoEx`, `EnumSystemLocalesEx`, `LCIDToLocaleName`, `GetUserPreferredUILanguages`), JSON-backed Windows Registry (`advapi32`) supporting 8-byte `REG_DWORD` `double` values used by Unity `PlayerPrefs.SetFloat`, and Landlock LSM filesystem sandboxing (`RineVfs`).
+- **Audio & Input:** Low-latency WASAPI over PipeWire/PulseAudio; full Win32 keyboard, mouse, and raw input message loop (`PeekMessageW`, `GetRawInputData`, `WH_MOUSE_LL`, cursor clipping/warping).
 
-### Key Architectural Concepts
+### Benchmarks (NVIDIA GeForce RTX 3060, Linux)
 
-- **In-Process Subsystem Execution:** Core Win32 libraries execute as native Rust functions within the guest's address space without inter-process communication.
-- **PE32+ Loader & Relocation Engine:** Full support for PE sections (`.text`, `.rdata`, `.data`, `.pdata`, `.rsrc`, `.reloc`), base relocations, and memory allocation strategies (`mmap` on-demand or preloaded into memory via `memfd_create`).
-- **Hardware Thread Context Virtualization:** Direct `TEB64` and `PEB64` allocation with `GS Base` binding via Linux `arch_prctl`.
-- **Direct Vulkan Bridge & Standalone DXVK:** Native `vkCreateWin32SurfaceKHR` translation to X11 (also compatible with Wayland sessions via XWayland/SDL2) paired with bundled standalone DXVK (`assets/dxvk/` and `~/.local/share/rine/dxvk/`), feeding Direct3D 9/10/11 commands straight to the host GPU driver without requiring Proton or Wine to be installed.
-- **Audio & Input Pipelines:** Low-latency WASAPI streams redirected to PipeWire/PulseAudio; Win32 message loop dispatching (`WM_KEYDOWN`, `WM_KEYUP`, keybinding persistence across sessions).
-- **Offline Steamworks Compatibility Layer:** Local stub implementation of `steam_api64.dll` (Flat API, callback queues, and mock interface vtables) enabling standalone execution of owned or developer-tested builds without requiring a running Steam background client.
-- **Filesystem & Landlock Sandbox:** Virtual Win32 drive mapping (`RineVfs`) isolating `C:\Users\...` writes to local prefixes (`~/.local/share/rine/prefixes/`) combined with Linux Landlock filesystem sandboxing (`src/sys/sandbox.rs`).
+#### 1. *How to Fish* (Unity 6 `6000.4.4f1`, 1920x1080, uncapped FPS, 700 MangoHud samples)
 
-### Performance Benchmark: Cuphead (60-Second Profile)
+| Metric | Rine Win64 Native | Proton Experimental |
+| :--- | :--- | :--- |
+| **Average FPS** | **136.26 FPS** | 129.31 FPS |
+| **Average Frame Time** | **8.27 ms** | 8.59 ms |
+| **1% Low FPS** | 55.52 FPS | **63.81 FPS** |
+| **p99 Frame Time** | 18.01 ms | **15.92 ms** |
+| **Average GPU Utilization** | **89.9%** | 99.4% |
+| **VRAM Usage** | **2,785 MB** | 3,273 MB |
 
-Single-session comparative measurements taken during a 60-second gameplay run of *Cuphead* on Linux (NVIDIA GeForce RTX 3060) comparing **Proton Experimental** against **Rine Win64 Native**:
+#### 2. *Cuphead* (Unity Mono, 60-Second Gameplay Profile)
 
-| Parameter / Metric | Proton Experimental | Rine Win64 Native | Notes |
+| Metric | Proton Experimental | Rine Win64 Native | Notes |
 | :--- | :--- | :--- | :--- |
-| **RAM Usage (Average)** | 2,723 MB (~2.7 GB) | **783 MB (~0.8 GB)** | **Saves 1.94 GB RAM (3.5x less memory)** |
-| **Peak RAM Consumption** | 3,310 MB (3.3 GB) | **818 MB (0.8 GB)** | **2.5 GB lower peak usage (4x lighter)** |
-| **Background Processes** | 22 – 24 processes | **1 single process** | Monolithic in-process runtime (no background daemons) |
-| **Peak CPU Spike** | 280.5% | **142.0%** | **~2x lower peak CPU spike** |
-| **Average CPU Load** | **91.4%** | 113.6% | Higher average CPU due to single-process polling/throughput without wineserver stalls |
-| **GPU Power Draw** | 57.1 W | **48.3 W** | **Saves ~9W GPU power** |
-| **Average GPU Utilization**| 48.4% | **36.6%** | Lower GPU overhead |
+| **RAM Usage (Average)** | 2,723 MB | **783 MB** | **3.5x less RAM** |
+| **Peak RAM Consumption** | 3,310 MB | **818 MB** | **4x lower peak** |
+| **Background Processes** | 22 – 24 processes | **1 process** | Single-process runtime |
+| **Peak CPU Spike** | 280.5% | **142.0%** | **~2x lower peak spike** |
+| **GPU Power Draw** | 57.1 W | **48.3 W** | **~9 W lower power** |
 
-### Compatibility & Engine Testing Status
+### Compatibility Status
 
-Rine is currently verified on a small set of targets representing distinct engine generations:
-
-| Title | Engine | Current Status | Notes |
+| Title | Engine | Status | Notes |
 | :--- | :--- | :--- | :--- |
-| **That's Not My Neighbor** | Godot Engine | **Fully Working** | Stable graphics, audio, and user input. |
-| **Cuphead** | Unity (Mono runtime) | **Fully Working** | Smooth gameplay, stable 60 FPS rendering, WASAPI audio, input loop, key rebindings persist to disk. |
-| **How to Fish** | Unity 6 (`6000.4.4f1`) | **Partial / Work in Progress** | Renders loading graphics via DXVK/Vulkan bridge; stalls at preloader stage (details below). |
+| **That's Not My Neighbor** | Godot Engine | **Fully Working** | Stable rendering, audio, and input. |
+| **Cuphead** | Unity (Mono) | **Fully Working** | Smooth 60 FPS gameplay, WASAPI audio, persistent keybinds. |
+| **How to Fish** | Unity 6 (`6000.4.4f1`) | **Working** | SteamStub 3.1, DXVK rendering, mouse/keyboard, localization, `PlayerPrefs` persistence, and Steam lobby/FishySteamworks host startup. |
 
-#### Known Technical Challenges: Unity 6 Support
-
-Modern Unity 6 builds introduce architectural hurdles compared to legacy Unity 5 / 2017:
-1. **Native C# Job System & Threading:** Unity 6 moves asset streaming, deserialization, and shader compilation into an aggressive worker pool (`UnityWorker` threads) that relies heavily on fine-grained Win32 synchronization primitives. Synchronization misses or lost wakeups cause the `blackScreenCanvasGroup.alpha` fade-out to remain stuck at 1.0 (preloader screen) in `LoadingManager`.
-2. **DXVK Frame Pacing Telemetry:** Unity 6 queries D3D11 frame presentation timestamps (`WaitForLastPresentationAndGetTimestamp`). Timing divergences over DXVK can cause the render loop to throttle itself thinking the previous frame was dropped.
-3. **Multithreaded Vulkan Pipeline Creation:** Concurrent compilation of SPIR-V shaders and calls to `vkCreatePipelineLayout` / `vkCreateDescriptorSetLayout` from worker threads demand strict structure alignment and mutex locking in host driver bridges (`libnvidia-gpucomp.so`).
-4. **Modern Windows API Requirements:** Aggressive polling of Per-Monitor DPI v2 (`GetDpiForWindow`, `SetProcessDpiAwarenessContext`) and microsecond-level timer queues (`CreateTimerQueueTimer`).
-
-### Building & Running
+### Building, Installing & Running
 
 #### Prerequisites
-- Rust 1.80+ (supporting `extern "win64"`)
-- Linux x86_64 with a Vulkan 1.3+ capable driver
-- X11 / SDL2 development headers (`libX11`, `libsdl2-dev`)
+- Rust 1.80+ (with `extern "win64"` support)
+- Linux x86_64 with Vulkan 1.3+ driver
+- X11 / SDL2 libraries (`libX11`, `libsdl2-dev`)
 
-#### Build
+#### Build & Install
 ```bash
-cargo check
-cargo build --release --bin rine
+cargo test --lib -- --test-threads=1
+./install.sh
 ```
 
 #### Run
 ```bash
-cargo run --release --bin rine -- "/path/to/game.exe"
+rine --gui
+rine "/path/to/game.exe"
 ```
 
 ### License
 
-This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See the `LICENSE` file for details.
+Licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See `LICENSE`.
 
 ---
 
 <a name="русский"></a>
 ## Русский
 
-> **Важно:** Rine находится на **ранней экспериментальной стадии разработки**. Это активный proof-of-concept слой совместимости, протестированный на ограниченном пуле целевых игр.
+> **Важно:** Rine находится на **активной экспериментальной стадии**. Это нативный внутрипроцессный слой совместимости Win64 для Linux x86_64, проверяемый на реальных играх на Godot, Unity (Mono) и Unity 6.
 
 ### О проекте
 
-**Rine** (*Rine is Not an Emulator*) — независимая среда выполнения Win64 и слой трансляции Windows API для систем Linux x86_64, разрабатываемый с нуля на языке Rust под лицензией **GNU General Public License v3.0 (GPL-3.0)**.
+**Rine** (*Rine Is Not an Emulator*) — среда выполнения Win64 и слой трансляции Windows API, написанный с нуля на Rust для Linux x86_64 под лицензией **GNU General Public License v3.0 (GPL-3.0)**.
 
-В отличие от классической связки Wine/Proton с обязательным фоновым демоном `wineserver` и десятками служебных процессов, Rine по умолчанию исполняет бинарные файлы Windows PE прямо внутри адресного пространства единого нативного процесса. Системные вызовы Win32 маппятся напрямую на примитивы ядра Linux (`futex`, `mmap`, POSIX I/O) и аппаратные регистры процессора через `arch_prctl`, исключая оверхед на IPC для однопроцессных игр. (В кодовой базе также предусмотрен опциональный лёгкий модуль `rineserver` для межпроцессного обмена дескрипторами при необходимости.)
+В отличие от Wine/Proton с обязательным фоновым `wineserver` и десятками дочерних процессов, Rine исполняет Windows PE-файлы напрямую в адресном пространстве одного нативного процесса Linux. Вызовы Win32 транслируются прямо на примитивы ядра Linux (`futex`, `mmap`, POSIX I/O) и регистр `GS Base` через `arch_prctl`, убирая лишний IPC-оверхед.
 
-### Покрытие API: реальная реализация и заглушки
+### Ключевые возможности
 
-Для честного и прозрачного разделения объёма кода:
-- **Реально реализованные подсистемы (~2 000+ функций):** Нативные реализации на Rust для `KERNEL32`, `NTDLL`, `USER32`, `GDI32`, `ADVAPI32`, `WS2_32`, `OLE32`, звука `WASAPI` (PipeWire/PulseAudio), загрузчика PE32+ и моста Vulkan/DXVK.
-- **Зарегистрированные IAT-заглушки (~650+ DLL-модулей):** Сгенерированные таблицы экспортов и безопасные динамические стабы (`[RINE UNRESOLVED BIND]`), которые предотвращают падение при обращении к второстепенным неиспользуемым импортам и логируют недостающие символы для отладки.
+- **Внутрипроцессный рантайм Win64 и загрузчик PE32+:** парсинг секций, релокации, IAT/delay-load, TLS-колбэки, `_initterm`, инициализация `PEB64`/`TEB64`.
+- **Win64 SEH, VEH и `longjmp`:** `RtlAddFunctionTable` / `RtlAddGrowableFunctionTable`, `RtlCaptureContext`, `RtlRestoreContext` (включая `STATUS_LONGJUMP`), `RtlUnwind` и `RtlUnwindEx` для корректной работы JIT Mono/Unity и C-рантайма.
+- **Прямой Vulkan Bridge и автономный DXVK:** трансляция `vkCreateWin32SurfaceKHR` на X11/XWayland/SDL2 и встроенный DXVK (`~/.local/share/rine/dxvk/`) для Direct3D 9/10/11 без установленного Proton или Wine.
+- **Нативный лаунчер (`--gui`) и оверлей (`--overlay`):** интерфейс на `eframe`/`egui` со сканером библиотеки Steam, управлением префиксами, лимитом FPS и интеграцией в меню приложений Linux (`install.sh`).
+- **Гибридный Steamworks Bridge и сеть:** распаковка SteamStub 3.1, мост `steam_api64.dll` -> нативный Linux `steamclient.so`, `SteamAPI_ManualDispatch` (очереди `703` CallResult и сырых колбэков), локальные лобби `ISteamMatchmaking` и `ISteamNetworkingSockets` / `ISteamNetworkingUtils` для P2P и Relay.
+- **Локализация Win32 NLS, реестр и песочница:** таблицы локалей (`IsValidLocaleName`, `GetLocaleInfoEx`, `EnumSystemLocalesEx`, `LCIDToLocaleName`, `GetUserPreferredUILanguages`), JSON-реестр (`advapi32`) с поддержкой 8-байтных `REG_DWORD` `double` для `Unity PlayerPrefs.SetFloat`, виртуальная ФС `RineVfs` и изоляция Linux Landlock.
+- **Звук и ввод:** WASAPI через PipeWire/PulseAudio с низкой задержкой; полный цикл сообщений клавиатуры, мыши и Raw Input (`PeekMessageW`, `GetRawInputData`, `WH_MOUSE_LL`).
 
-### Архитектурные особенности
+### Результаты бенчмарков (NVIDIA GeForce RTX 3060, Linux)
 
-- **Внутрипроцессная архитектура API:** Основные системные библиотеки работают как нативные Rust-функции в том же адресном пространстве без контекстных переключений между демонами.
-- **Загрузчик PE32+ и релокации:** Парсинг секций PE (`.text`, `.rdata`, `.data`, `.pdata`, `.rsrc`, `.reloc`), релокации базовых адресов и гибкая загрузка (`mmap` по требованию или предзагрузка в RAM через `memfd_create`).
-- **Виртуализация контекста потоков (TEB / PEB):** Инициализация структур `TEB64` и `PEB64` с привязкой сегментного регистра `GS Base` через Linux `arch_prctl`.
-- **Прямой Vulkan Bridge и встроенный DXVK:** Трансляция `vkCreateWin32SurfaceKHR` на X11 (с поддержкой Wayland-сессий через XWayland/SDL2) в паре с автономным DXVK (`assets/dxvk/` и `~/.local/share/rine/dxvk/`). Работает **без установленного Proton или Wine**.
-- **Звуковая подсистема и ввод:** Вывод звука через WASAPI в PipeWire и PulseAudio. Диспетчеризация сообщений ввода (`WM_KEYDOWN`, `WM_KEYUP`), сохранение настроек управления между сессиями.
-- **Автономный слой совместимости Steamworks:** Локальная реализация заглушек `steam_api64.dll` (Flat API, очереди коллбеков и mock vtable интерфейсов), позволяющая запускать собственные или поддерживаемые сборки без запущенного фонового клиента Steam.
-- **Виртуальная ФС и изоляция Landlock:** Виртуальный маппинг дисков (`RineVfs`) перенаправляет запись `C:\Users\...` в локальный префикс (`~/.local/share/rine/prefixes/`), а модуль `src/sys/sandbox.rs` ограничивает доступ к хост-системе через Linux Landlock.
+#### 1. *How to Fish* (Unity 6 `6000.4.4f1`, 1920x1080, без лимита FPS, 700 сэмплов MangoHud)
 
-### Результаты сравнительного бенчмарка: Cuphead (60-секундный замер)
+| Метрика | Rine Win64 Native | Proton Experimental |
+| :--- | :--- | :--- |
+| **Средний FPS** | **136.26 FPS** | 129.31 FPS |
+| **Средний Frame time** | **8.27 мс** | 8.59 мс |
+| **1% low FPS** | 55.52 FPS | **63.81 FPS** |
+| **p99 Frame time** | 18.01 мс | **15.92 мс** |
+| **Нагрузка GPU** | **89.9%** | 99.4% |
+| **VRAM** | **2 785 МБ** | 3 273 МБ |
 
-Единичный сравнительный замер 60-секундной сессии в игре *Cuphead* на Linux (NVIDIA GeForce RTX 3060) между **Proton Experimental** и **Rine Win64 Native**:
+#### 2. *Cuphead* (Unity Mono, 60-секундный замер геймплея)
 
-| Параметр / Метрика | Proton Experimental | Rine Win64 Native | Примечания |
+| Метрика | Proton Experimental | Rine Win64 Native | Примечание |
 | :--- | :--- | :--- | :--- |
-| **Потребление RAM (Среднее)** | 2 723 MB (~2.7 ГБ) | **783 MB (~0.8 ГБ)** | **Экономия 1.94 ГБ RAM (в 3.5 раза меньше)** |
-| **Пиковое потребление RAM** | 3 310 MB (3.3 ГБ) | **818 MB (0.8 ГБ)** | **На 2.5 ГБ легче в пике (в 4 раза меньше)** |
-| **Количество процессов** | 22 – 24 процесса | **1 процесс** | Монолитная In-Process архитектура без фоновых демонов |
-| **Пиковый скачок CPU** | 280.5% | **142.0%** | **Пиковая нагрузка на процессор в ~2 раза ниже** |
-| **Средняя нагрузка CPU** | **91.4%** | 113.6% | Более высокая средняя загрузка CPU за счёт однопроцессного цикла рендера/опроса без простоев wineserver |
-| **Энергопотребление GPU (Ватты)** | 57.1 W | **48.3 W** | **Экономия ~9 Вт питания видеокарты** |
-| **Средняя утилизация GPU** | 48.4% | **36.6%** | Меньший оверхед на GPU |
+| **Средняя RAM** | 2 723 МБ | **783 МБ** | **В 3.5 раза меньше RAM** |
+| **Пиковая RAM** | 3 310 МБ | **818 МБ** | **В 4 раза меньше в пике** |
+| **Процессы** | 22 – 24 процесса | **1 процесс** | Без фоновых демонов |
+| **Пик CPU** | 280.5% | **142.0%** | **В ~2 раза ниже пик** |
+| **Потребление GPU** | 57.1 Вт | **48.3 Вт** | **Экономия ~9 Вт** |
 
-### Текущий статус совместимости с играми
-
-На текущем этапе проект проверен на трёх играх, представляющих разные поколения движков:
+### Статус совместимости игр
 
 | Игра | Движок | Статус | Примечания |
 | :--- | :--- | :--- | :--- |
-| **That's Not My Neighbor** | Godot Engine | **Работает идеально** | Стабильный рендеринг, звук, логика и обработка ввода. |
-| **Cuphead** | Unity (Mono runtime) | **Работает отлично** | Стабильный 60 FPS геймплей, чистый звук WASAPI, полный цикл ввода, сохранение биндов клавиш в конфиг. |
-| **How to Fish** | Unity 6 (`6000.4.4f1`) | **Частично (в разработке)** | Отрисовывается загрузочный экран через DXVK/Vulkan, зависает на этапе прелоадера (детали ниже). |
+| **That's Not My Neighbor** | Godot Engine | **Работает полностью** | Стабильный рендеринг, звук и ввод. |
+| **Cuphead** | Unity (Mono) | **Работает полностью** | Стабильные 60 FPS, звук WASAPI, сохранение управления. |
+| **How to Fish** | Unity 6 (`6000.4.4f1`) | **Работает** | SteamStub 3.1, DXVK, мышь/клавиатура, локализация, сохранение настроек `PlayerPrefs`, создание Steam-лобби и запуск хоста FishySteamworks. |
 
-#### Технические сложности и текущие проблемы с Unity 6
+### Сборка, установка и запуск
 
-Архитектура Unity 6 принципиально отличается от классического Unity 5:
-1. **Native C# Job System и потоки:** В Unity 6 загрузка сцен, десериализация и компиляция вынесены в пул рабочих потоков (`UnityWorker`), интенсивно использующих примитивы синхронизации Win32. Пропуск пробуждения (lost wakeup) в планировщике приводит к тому, что `LoadingManager` не переключает `blackScreenCanvasGroup.alpha` из 1.0 в 0.0 (экран остаётся серым со спиннером-крючком).
-2. **Рассинхронизация темпа кадров (DXVK Frame Pacing):** Движок запрашивает у DXGI точные метрики времени кадра (`WaitForLastPresentationAndGetTimestamp`). При трансляции через DXVK задержки презентации интерпретируются движком иначе, что может приводить к самоторможению конвейера рендеринга.
-3. **Многопоточный Vulkan:** Параллельная компиляция шейдеров SPIR-V и создание дескрипторов (`vkCreatePipelineLayout` / `vkCreateDescriptorSetLayout`) требуют абсолютной корректности синхронизации и выравнивания структур внутри драйвера (`libnvidia-gpucomp.so`).
-4. **Новые вызовы Windows API:** Активное использование Per-Monitor DPI v2 (`GetDpiForWindow`, `SetProcessDpiAwarenessContext`) и таймеров высокого разрешения (`CreateTimerQueueTimer`).
-
-### Сборка и запуск
-
-#### Системные требования
+#### Требования
 - Rust 1.80+ (с поддержкой `extern "win64"`)
 - Linux x86_64, драйвер с поддержкой Vulkan 1.3+
-- Библиотеки разработки X11 / SDL2 (`libX11`, `libsdl2-dev`)
+- Библиотеки X11 / SDL2 (`libX11`, `libsdl2-dev`)
 
-#### Сборка
+#### Сборка и установка
 ```bash
-cargo check
-cargo build --release --bin rine
+cargo test --lib -- --test-threads=1
+./install.sh
 ```
 
 #### Запуск
 ```bash
-cargo run --release --bin rine -- "/путь/к/игре.exe"
+rine --gui
+rine "/путь/к/игре.exe"
 ```
 
 ### Лицензия

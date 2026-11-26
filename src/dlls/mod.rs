@@ -27,6 +27,7 @@ pub mod secur32;
 pub mod setupapi;
 pub mod shell;
 pub mod steam;
+pub mod steam_bridge;
 pub mod uiautomation;
 pub mod user32;
 pub mod wasapi;

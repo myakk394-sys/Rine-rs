@@ -252,7 +252,16 @@ impl IatSymbolResolver {
 
         let dll_upper = dll_name.to_uppercase();
 
-        if dll_upper.starts_with("STEAM_API")
+        if crate::dlls::steam_bridge::is_bridge_enabled() {
+            if dll_upper.starts_with("STEAMCLIENT") || dll_upper.starts_with("LSTEAMCLIENT") {
+                if let Some(ptr) = crate::dlls::steam_bridge::resolve_steamclient_symbol(func_name) {
+                    return Some(ptr);
+                }
+            }
+            if dll_upper.starts_with("STEAM_API") {
+                return None;
+            }
+        } else if dll_upper.starts_with("STEAM_API")
             || dll_upper.starts_with("STEAMCLIENT")
             || dll_upper.starts_with("LSTEAMCLIENT")
             || dll_upper.starts_with("CSTEAMWORKS")
@@ -762,6 +771,12 @@ impl IatSymbolResolver {
                     "IsValidLocaleName" => {
                         Some(dlls::kernel32::IsValidLocaleName as *const () as usize)
                     }
+                    "GetUserPreferredUILanguages" => {
+                        Some(dlls::kernel32::GetUserPreferredUILanguages as *const () as usize)
+                    }
+                    "GetThreadPreferredUILanguages" => {
+                        Some(dlls::kernel32::GetThreadPreferredUILanguages as *const () as usize)
+                    }
                     "GetStringTypeW" => Some(dlls::kernel32::GetStringTypeW as *const () as usize),
                     "GetStringTypeA" => Some(dlls::kernel32::GetStringTypeA as *const () as usize),
                     "GetStringTypeExW" => {
@@ -864,6 +879,9 @@ impl IatSymbolResolver {
                     }
                     "RtlCaptureContext" => {
                         Some(dlls::kernel32::RtlCaptureContext as *const () as usize)
+                    }
+                    "RtlRestoreContext" => {
+                        Some(dlls::kernel32::RtlRestoreContext as *const () as usize)
                     }
                     "RtlCaptureStackBackTrace" => {
                         Some(dlls::kernel32::RtlCaptureStackBackTrace as *const () as usize)

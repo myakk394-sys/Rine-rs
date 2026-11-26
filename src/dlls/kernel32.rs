@@ -494,6 +494,138 @@ pub unsafe extern "win64" fn RtlVirtualUnwind(
     }
 }
 
+#[repr(C, align(16))]
+struct Win64Context([u8; 1232]);
+
+#[no_mangle]
+#[unsafe(naked)]
+pub unsafe extern "win64" fn RtlCaptureContext(_context_record: *mut u8) {
+    std::arch::naked_asm!(
+        "test rcx, rcx",
+        "jz 2f",
+        "mov qword ptr [rcx + 0x78], rax",
+        "mov qword ptr [rcx + 0x80], rcx",
+        "mov qword ptr [rcx + 0x88], rdx",
+        "mov qword ptr [rcx + 0x90], rbx",
+        "lea rax, [rsp + 8]",
+        "mov qword ptr [rcx + 0x98], rax",
+        "mov qword ptr [rcx + 0xA0], rbp",
+        "mov qword ptr [rcx + 0xA8], rsi",
+        "mov qword ptr [rcx + 0xB0], rdi",
+        "mov qword ptr [rcx + 0xB8], r8",
+        "mov qword ptr [rcx + 0xC0], r9",
+        "mov qword ptr [rcx + 0xC8], r10",
+        "mov qword ptr [rcx + 0xD0], r11",
+        "mov qword ptr [rcx + 0xD8], r12",
+        "mov qword ptr [rcx + 0xE0], r13",
+        "mov qword ptr [rcx + 0xE8], r14",
+        "mov qword ptr [rcx + 0xF0], r15",
+        "mov rax, qword ptr [rsp]",
+        "mov qword ptr [rcx + 0xF8], rax",
+        "movdqu xmmword ptr [rcx + 0x200], xmm6",
+        "movdqu xmmword ptr [rcx + 0x210], xmm7",
+        "movdqu xmmword ptr [rcx + 0x220], xmm8",
+        "movdqu xmmword ptr [rcx + 0x230], xmm9",
+        "movdqu xmmword ptr [rcx + 0x240], xmm10",
+        "movdqu xmmword ptr [rcx + 0x250], xmm11",
+        "movdqu xmmword ptr [rcx + 0x260], xmm12",
+        "movdqu xmmword ptr [rcx + 0x270], xmm13",
+        "movdqu xmmword ptr [rcx + 0x280], xmm14",
+        "movdqu xmmword ptr [rcx + 0x290], xmm15",
+        "mov dword ptr [rcx + 0x30], 0x0010000F", // CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT
+        "2:",
+        "ret",
+    );
+}
+
+#[no_mangle]
+#[unsafe(naked)]
+pub unsafe extern "win64" fn RtlRestoreContext(
+    _context_record: *const u8,
+    _exception_record: *const u8,
+) {
+    std::arch::naked_asm!(
+        "test rdx, rdx",
+        "jz 2f",
+        "cmp dword ptr [rdx], 0x80000026", // STATUS_LONGJUMP
+        "jne 2f",
+        "cmp dword ptr [rdx + 0x18], 1", // NumberParameters >= 1
+        "jb 2f",
+        "mov r8, qword ptr [rdx + 0x20]", // ExceptionInformation[0] = jmp_buf
+        "test r8, r8",
+        "jz 2f",
+        "mov rax, qword ptr [rcx + 0x78]", // ReturnValue
+        "mov rbx, qword ptr [r8 + 0x08]",
+        "mov rbp, qword ptr [r8 + 0x18]",
+        "mov rsi, qword ptr [r8 + 0x20]",
+        "mov rdi, qword ptr [r8 + 0x28]",
+        "mov r12, qword ptr [r8 + 0x30]",
+        "mov r13, qword ptr [r8 + 0x38]",
+        "mov r14, qword ptr [r8 + 0x40]",
+        "mov r15, qword ptr [r8 + 0x48]",
+        "ldmxcsr dword ptr [r8 + 0x58]",
+        "movdqu xmm6, xmmword ptr [r8 + 0x60]",
+        "movdqu xmm7, xmmword ptr [r8 + 0x70]",
+        "movdqu xmm8, xmmword ptr [r8 + 0x80]",
+        "movdqu xmm9, xmmword ptr [r8 + 0x90]",
+        "movdqu xmm10, xmmword ptr [r8 + 0xA0]",
+        "movdqu xmm11, xmmword ptr [r8 + 0xB0]",
+        "movdqu xmm12, xmmword ptr [r8 + 0xC0]",
+        "movdqu xmm13, xmmword ptr [r8 + 0xD0]",
+        "movdqu xmm14, xmmword ptr [r8 + 0xE0]",
+        "movdqu xmm15, xmmword ptr [r8 + 0xF0]",
+        "mov r11, qword ptr [r8 + 0x50]",
+        "mov rsp, qword ptr [r8 + 0x10]",
+        "jmp r11",
+        "2:",
+        "test rcx, rcx",
+        "jz 3f",
+        "mov rbx, qword ptr [rcx + 0x90]",
+        "mov rbp, qword ptr [rcx + 0xA0]",
+        "mov rsi, qword ptr [rcx + 0xA8]",
+        "mov rdi, qword ptr [rcx + 0xB0]",
+        "mov r12, qword ptr [rcx + 0xD8]",
+        "mov r13, qword ptr [rcx + 0xE0]",
+        "mov r14, qword ptr [rcx + 0xE8]",
+        "mov r15, qword ptr [rcx + 0xF0]",
+        "movdqu xmm6, xmmword ptr [rcx + 0x200]",
+        "movdqu xmm7, xmmword ptr [rcx + 0x210]",
+        "movdqu xmm8, xmmword ptr [rcx + 0x220]",
+        "movdqu xmm9, xmmword ptr [rcx + 0x230]",
+        "movdqu xmm10, xmmword ptr [rcx + 0x240]",
+        "movdqu xmm11, xmmword ptr [rcx + 0x250]",
+        "movdqu xmm12, xmmword ptr [rcx + 0x260]",
+        "movdqu xmm13, xmmword ptr [rcx + 0x270]",
+        "movdqu xmm14, xmmword ptr [rcx + 0x280]",
+        "movdqu xmm15, xmmword ptr [rcx + 0x290]",
+        "mov rax, qword ptr [rcx + 0x78]",
+        "mov r11, qword ptr [rcx + 0xF8]",
+        "mov rsp, qword ptr [rcx + 0x98]",
+        "jmp r11",
+        "3:",
+        "ret",
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn RtlUnwind(
+    target_frame: usize,
+    target_ip: usize,
+    exception_record: usize,
+    return_value: usize,
+) {
+    let mut ctx = Win64Context([0u8; 1232]);
+    RtlCaptureContext(ctx.0.as_mut_ptr());
+    RtlUnwindEx(
+        target_frame,
+        target_ip,
+        exception_record,
+        return_value,
+        ctx.0.as_mut_ptr() as usize,
+        0,
+    );
+}
+
 #[no_mangle]
 pub unsafe extern "win64" fn RtlUnwindEx(
     target_frame: usize,
@@ -514,12 +646,17 @@ pub unsafe extern "win64" fn RtlUnwindEx(
     let mut iterations = 0;
     while ctx.rip() != 0 && iterations < 256 {
         iterations += 1;
-        if target_frame != 0 && ctx.rsp() as usize >= target_frame {
+        let prev_rsp = ctx.rsp() as usize;
+        if target_frame != 0 && prev_rsp >= target_frame {
             break;
         }
 
         let mut image_base: usize = 0;
         let fn_entry = RtlLookupFunctionEntry(ctx.rip() as usize, &mut image_base, history_table);
+        if fn_entry == 0 {
+            // Do not attempt Win64 virtual unwind on host ELF frames (e.g. from RtlUnwind)
+            break;
+        }
 
         let mut handler_data: usize = 0;
         let mut establisher_frame: usize = 0;
@@ -549,6 +686,9 @@ pub unsafe extern "win64" fn RtlUnwindEx(
         if target_frame != 0 && establisher_frame >= target_frame {
             break;
         }
+        if (ctx.rsp() as usize) <= prev_rsp {
+            break;
+        }
     }
 
     if target_ip != 0 {
@@ -558,6 +698,7 @@ pub unsafe extern "win64" fn RtlUnwindEx(
         ctx.set_rsp(target_frame as u64);
     }
     ctx.set_reg(0, return_value as u64); // RAX = return_value
+    RtlRestoreContext(context_record as *const u8, exception_record as *const u8);
 }
 
 const FUTEX_WAIT: i32 = 0;
@@ -2735,16 +2876,34 @@ pub unsafe extern "win64" fn SetStdHandle(_n_std_handle: u32, _h_handle: u64) ->
     1
 }
 
+#[repr(C)]
+struct WinOverlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    h_event: u64,
+}
+
 #[no_mangle]
 pub unsafe extern "win64" fn GetOverlappedResult(
     _h_file: u64,
-    _lp_overlapped: *mut (),
+    lp_overlapped: *mut (),
     lp_number_of_bytes_transferred: *mut u32,
-    _b_wait: i32,
+    b_wait: i32,
 ) -> i32 {
-    if !lp_number_of_bytes_transferred.is_null() {
-        *lp_number_of_bytes_transferred = 0;
+    if lp_overlapped.is_null() {
+        SetLastError(87);
+        return 0;
     }
+    let ov = &*(lp_overlapped as *const WinOverlapped);
+    if b_wait != 0 && ov.internal == 0x103 /* STATUS_PENDING */ && ov.h_event != 0 {
+        WaitForSingleObject(ov.h_event, 0xFFFFFFFF);
+    }
+    if !lp_number_of_bytes_transferred.is_null() {
+        *lp_number_of_bytes_transferred = ov.internal_high as u32;
+    }
+    SetLastError(0);
     1
 }
 
@@ -3415,6 +3574,15 @@ pub unsafe extern "win64" fn CreateEventW(
     }
     let handle = next_handle();
     event_table_insert(handle, manual_reset != 0, initial_state != 0);
+    if std::env::var_os("RINE_DEADLOCK_WATCH").is_some() {
+        println!(
+            "[RINE DEADLOCK WATCH] CreateEventW tid={} handle=0x{:X} manual={} init={}",
+            GetCurrentThreadId(),
+            handle,
+            manual_reset != 0,
+            initial_state != 0
+        );
+    }
     handle as usize
 }
 
@@ -4279,14 +4447,28 @@ fn get_known_native_base(name: &str) -> Option<usize> {
         || lower == "bluetoothapis"
     {
         Some(0x7FE10000)
+    } else if lower == "steamclient64.dll"
+        || lower == "steamclient64"
+        || lower == "steamclient.dll"
+        || lower == "steamclient"
+        || lower == "lsteamclient.dll"
+    {
+        if crate::dlls::steam_bridge::is_bridge_enabled() {
+            Some(crate::dlls::steam_bridge::STEAMCLIENT_BRIDGE_BASE)
+        } else {
+            Some(0x7FE00000)
+        }
     } else if lower == "steam_api64.dll"
         || lower == "steam_api64"
         || lower == "steam_api.dll"
         || lower == "steam_api"
-        || lower == "steamclient64.dll"
-        || lower == "steamclient64"
     {
-        Some(0x7FE00000)
+        if crate::dlls::steam_bridge::is_bridge_enabled() {
+            // Let the PE companion loader load the game's real steam_api64.dll
+            None
+        } else {
+            Some(0x7FE00000)
+        }
     } else if lower == "winhttp.dll" || lower == "winhttp" {
         Some(0x7FDF0000)
     } else {
@@ -4499,6 +4681,7 @@ impl ModuleRegistry {
             0x7FE30000 => Some("cfgmgr32.dll".to_string()),
             0x7FE20000 => Some("dstorage.dll".to_string()),
             0x7FE10000 => Some("bthprops.cpl".to_string()),
+            0x7FE18000 => Some("steamclient64.dll".to_string()),
             0x7FE00000 => Some("steam_api64.dll".to_string()),
             0x7FDF0000 => Some("winhttp.dll".to_string()),
             _ => None,
@@ -4846,7 +5029,12 @@ pub unsafe extern "win64" fn GetCurrentDirectoryW(
 /// Helper to resolve a Win32 path relative to the current working directory
 pub fn resolve_win32_path(input_path: &str, current_cwd: &str) -> String {
     let norm = input_path.replace('/', "\\");
-    let trimmed = norm.trim();
+    let mut trimmed = norm.trim();
+    if let Some(rest) = trimmed.strip_prefix(r"\\?\").or_else(|| trimmed.strip_prefix(r"\??\")) {
+        if rest.len() >= 2 && rest.as_bytes()[1] == b':' {
+            trimmed = rest;
+        }
+    }
 
     if trimmed.is_empty() {
         return current_cwd.to_string();
@@ -5618,6 +5806,7 @@ pub unsafe extern "win64" fn CreateFileW(
             }
             if fd >= 0 {
                 register_fd_handle(fd as u64);
+                register_simulated_device_fd(fd as u64);
                 SetLastError(0);
                 println!(
                     "[KERNEL32] CreateFileW SUCCEEDED for simulated device: '{}' (fd={})",
@@ -6636,6 +6825,23 @@ fn register_fd_handle(fd: u64) {
         .insert(fd);
 }
 
+static SIMULATED_DEVICE_FDS: std::sync::Mutex<Option<std::collections::HashSet<u64>>> =
+    std::sync::Mutex::new(None);
+
+fn register_simulated_device_fd(fd: u64) {
+    let mut g = SIMULATED_DEVICE_FDS.lock().unwrap();
+    g.get_or_insert_with(std::collections::HashSet::new)
+        .insert(fd);
+}
+
+fn is_simulated_device_fd(handle: u64) -> bool {
+    if handle > 0xFFFF {
+        return false;
+    }
+    let g = SIMULATED_DEVICE_FDS.lock().unwrap();
+    g.as_ref().map(|s| s.contains(&handle)).unwrap_or(false)
+}
+
 fn is_fd_handle(handle: u64) -> bool {
     if handle > 0xFFFF {
         return false;
@@ -6650,20 +6856,59 @@ pub unsafe extern "win64" fn ReadFile(
     lp_buffer: *mut u8,
     n_number_of_bytes_to_read: u32,
     lp_number_of_bytes_read: *mut u32,
-    _lp_overlapped: *mut u8,
+    lp_overlapped: *mut u8,
 ) -> i32 {
     let fd = h_file as i64 as i32;
+    if fd > 2 && is_simulated_device_fd(fd as u64) {
+        if !lp_number_of_bytes_read.is_null() {
+            *lp_number_of_bytes_read = 0;
+        }
+        if !lp_overlapped.is_null() {
+            let ov = &mut *(lp_overlapped as *mut WinOverlapped);
+            ov.internal = 0x0000_0103; // STATUS_PENDING
+            ov.internal_high = 0;
+            SetLastError(997 /* ERROR_IO_PENDING */);
+        } else {
+            SetLastError(1167 /* ERROR_DEVICE_NOT_CONNECTED */);
+        }
+        return 0;
+    }
     if fd > 2 && is_fd_handle(fd as u64) && !lp_buffer.is_null() && n_number_of_bytes_to_read > 0 {
         let mut total_read = 0usize;
         let target = n_number_of_bytes_to_read as usize;
         let mut read_err = false;
+        let use_pread = !lp_overlapped.is_null();
+        let base_offset: i64 = if use_pread {
+            let ov = &*(lp_overlapped as *const WinOverlapped);
+            ((ov.offset as u64) | ((ov.offset_high as u64) << 32)) as i64
+        } else {
+            0
+        };
 
         while total_read < target {
-            let ret = libc::read(
-                fd,
-                lp_buffer.add(total_read) as *mut libc::c_void,
-                target - total_read,
-            );
+            let ret = if use_pread {
+                let r = libc::pread(
+                    fd,
+                    lp_buffer.add(total_read) as *mut libc::c_void,
+                    target - total_read,
+                    base_offset + total_read as i64,
+                );
+                if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESPIPE) {
+                    libc::read(
+                        fd,
+                        lp_buffer.add(total_read) as *mut libc::c_void,
+                        target - total_read,
+                    )
+                } else {
+                    r
+                }
+            } else {
+                libc::read(
+                    fd,
+                    lp_buffer.add(total_read) as *mut libc::c_void,
+                    target - total_read,
+                )
+            };
             if ret > 0 {
                 total_read += ret as usize;
             } else if ret == 0 {
@@ -6686,6 +6931,15 @@ pub unsafe extern "win64" fn ReadFile(
             return 0; // FALSE
         }
 
+        if !lp_overlapped.is_null() {
+            let ov = &mut *(lp_overlapped as *mut WinOverlapped);
+            ov.internal = 0; // STATUS_SUCCESS
+            ov.internal_high = total_read;
+            if ov.h_event != 0 {
+                SetEvent(ov.h_event);
+            }
+        }
+
         if !lp_number_of_bytes_read.is_null() {
             *lp_number_of_bytes_read = total_read as u32;
         }
@@ -6694,6 +6948,14 @@ pub unsafe extern "win64" fn ReadFile(
     // fallback: zero fill
     if !lp_buffer.is_null() && n_number_of_bytes_to_read > 0 {
         std::ptr::write_bytes(lp_buffer, 0, n_number_of_bytes_to_read as usize);
+    }
+    if !lp_overlapped.is_null() {
+        let ov = &mut *(lp_overlapped as *mut WinOverlapped);
+        ov.internal = 0;
+        ov.internal_high = n_number_of_bytes_to_read as usize;
+        if ov.h_event != 0 {
+            SetEvent(ov.h_event);
+        }
     }
     if !lp_number_of_bytes_read.is_null() {
         *lp_number_of_bytes_read = n_number_of_bytes_to_read;
@@ -7468,48 +7730,381 @@ pub unsafe extern "win64" fn GetSystemDefaultLangID() -> u16 {
     loc.lang_id
 }
 
+#[derive(Clone, Copy)]
+struct LocaleEntry {
+    name: &'static str,
+    lcid: u32,
+    iso639: &'static str,
+    iso639_2: &'static str,
+    iso3166: &'static str,
+    eng_lang: &'static str,
+    native_lang: &'static str,
+    eng_country: &'static str,
+    parent: &'static str,
+    ansi_cp: u32,
+    oem_cp: u32,
+}
+
+const LOCALE_TABLE: &[LocaleEntry] = &[
+    LocaleEntry { name: "", lcid: 0x007F, iso639: "iv", iso639_2: "ivl", iso3166: "", eng_lang: "Invariant Language", native_lang: "Invariant Language", eng_country: "Invariant Country", parent: "", ansi_cp: 1252, oem_cp: 437 },
+    LocaleEntry { name: "en", lcid: 0x0009, iso639: "en", iso639_2: "eng", iso3166: "", eng_lang: "English", native_lang: "English", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 437 },
+    LocaleEntry { name: "en-US", lcid: 0x0409, iso639: "en", iso639_2: "eng", iso3166: "US", eng_lang: "English", native_lang: "English", eng_country: "United States", parent: "en", ansi_cp: 1252, oem_cp: 437 },
+    LocaleEntry { name: "en-GB", lcid: 0x0809, iso639: "en", iso639_2: "eng", iso3166: "GB", eng_lang: "English", native_lang: "English", eng_country: "United Kingdom", parent: "en", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "ru", lcid: 0x0019, iso639: "ru", iso639_2: "rus", iso3166: "", eng_lang: "Russian", native_lang: "русский", eng_country: "", parent: "", ansi_cp: 1251, oem_cp: 866 },
+    LocaleEntry { name: "ru-RU", lcid: 0x0419, iso639: "ru", iso639_2: "rus", iso3166: "RU", eng_lang: "Russian", native_lang: "русский", eng_country: "Russia", parent: "ru", ansi_cp: 1251, oem_cp: 866 },
+    LocaleEntry { name: "uk", lcid: 0x0022, iso639: "uk", iso639_2: "ukr", iso3166: "", eng_lang: "Ukrainian", native_lang: "українська", eng_country: "", parent: "", ansi_cp: 1251, oem_cp: 866 },
+    LocaleEntry { name: "uk-UA", lcid: 0x0422, iso639: "uk", iso639_2: "ukr", iso3166: "UA", eng_lang: "Ukrainian", native_lang: "українська", eng_country: "Ukraine", parent: "uk", ansi_cp: 1251, oem_cp: 866 },
+    LocaleEntry { name: "de", lcid: 0x0007, iso639: "de", iso639_2: "deu", iso3166: "", eng_lang: "German", native_lang: "Deutsch", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "de-DE", lcid: 0x0407, iso639: "de", iso639_2: "deu", iso3166: "DE", eng_lang: "German", native_lang: "Deutsch", eng_country: "Germany", parent: "de", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "fr", lcid: 0x000C, iso639: "fr", iso639_2: "fra", iso3166: "", eng_lang: "French", native_lang: "français", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "fr-FR", lcid: 0x040C, iso639: "fr", iso639_2: "fra", iso3166: "FR", eng_lang: "French", native_lang: "français", eng_country: "France", parent: "fr", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "es", lcid: 0x000A, iso639: "es", iso639_2: "spa", iso3166: "", eng_lang: "Spanish", native_lang: "español", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "es-ES", lcid: 0x0C0A, iso639: "es", iso639_2: "spa", iso3166: "ES", eng_lang: "Spanish", native_lang: "español", eng_country: "Spain", parent: "es", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "es-419", lcid: 0x580A, iso639: "es", iso639_2: "spa", iso3166: "419", eng_lang: "Spanish", native_lang: "español", eng_country: "Latin America", parent: "es", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "pt", lcid: 0x0016, iso639: "pt", iso639_2: "por", iso3166: "", eng_lang: "Portuguese", native_lang: "português", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "pt-BR", lcid: 0x0416, iso639: "pt", iso639_2: "por", iso3166: "BR", eng_lang: "Portuguese", native_lang: "português", eng_country: "Brazil", parent: "pt", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "pt-PT", lcid: 0x0816, iso639: "pt", iso639_2: "por", iso3166: "PT", eng_lang: "Portuguese", native_lang: "português", eng_country: "Portugal", parent: "pt", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "it", lcid: 0x0010, iso639: "it", iso639_2: "ita", iso3166: "", eng_lang: "Italian", native_lang: "italiano", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "it-IT", lcid: 0x0410, iso639: "it", iso639_2: "ita", iso3166: "IT", eng_lang: "Italian", native_lang: "italiano", eng_country: "Italy", parent: "it", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "pl", lcid: 0x0015, iso639: "pl", iso639_2: "pol", iso3166: "", eng_lang: "Polish", native_lang: "polski", eng_country: "", parent: "", ansi_cp: 1250, oem_cp: 852 },
+    LocaleEntry { name: "pl-PL", lcid: 0x0415, iso639: "pl", iso639_2: "pol", iso3166: "PL", eng_lang: "Polish", native_lang: "polski", eng_country: "Poland", parent: "pl", ansi_cp: 1250, oem_cp: 852 },
+    LocaleEntry { name: "tr", lcid: 0x001F, iso639: "tr", iso639_2: "tur", iso3166: "", eng_lang: "Turkish", native_lang: "Türkçe", eng_country: "", parent: "", ansi_cp: 1254, oem_cp: 857 },
+    LocaleEntry { name: "tr-TR", lcid: 0x041F, iso639: "tr", iso639_2: "tur", iso3166: "TR", eng_lang: "Turkish", native_lang: "Türkçe", eng_country: "Turkey", parent: "tr", ansi_cp: 1254, oem_cp: 857 },
+    LocaleEntry { name: "ja", lcid: 0x0011, iso639: "ja", iso639_2: "jpn", iso3166: "", eng_lang: "Japanese", native_lang: "日本語", eng_country: "", parent: "", ansi_cp: 932, oem_cp: 932 },
+    LocaleEntry { name: "ja-JP", lcid: 0x0411, iso639: "ja", iso639_2: "jpn", iso3166: "JP", eng_lang: "Japanese", native_lang: "日本語", eng_country: "Japan", parent: "ja", ansi_cp: 932, oem_cp: 932 },
+    LocaleEntry { name: "ko", lcid: 0x0012, iso639: "ko", iso639_2: "kor", iso3166: "", eng_lang: "Korean", native_lang: "한국어", eng_country: "", parent: "", ansi_cp: 949, oem_cp: 949 },
+    LocaleEntry { name: "ko-KR", lcid: 0x0412, iso639: "ko", iso639_2: "kor", iso3166: "KR", eng_lang: "Korean", native_lang: "한국어", eng_country: "Korea", parent: "ko", ansi_cp: 949, oem_cp: 949 },
+    LocaleEntry { name: "zh", lcid: 0x7804, iso639: "zh", iso639_2: "zho", iso3166: "", eng_lang: "Chinese", native_lang: "中文", eng_country: "", parent: "", ansi_cp: 936, oem_cp: 936 },
+    LocaleEntry { name: "zh-Hans", lcid: 0x0004, iso639: "zh", iso639_2: "zho", iso3166: "CN", eng_lang: "Chinese (Simplified)", native_lang: "中文(简体)", eng_country: "China", parent: "zh", ansi_cp: 936, oem_cp: 936 },
+    LocaleEntry { name: "zh-CN", lcid: 0x0804, iso639: "zh", iso639_2: "zho", iso3166: "CN", eng_lang: "Chinese (Simplified)", native_lang: "中文(简体)", eng_country: "China", parent: "zh-Hans", ansi_cp: 936, oem_cp: 936 },
+    LocaleEntry { name: "zh-Hant", lcid: 0x7C04, iso639: "zh", iso639_2: "zho", iso3166: "TW", eng_lang: "Chinese (Traditional)", native_lang: "中文(繁體)", eng_country: "Taiwan", parent: "zh", ansi_cp: 950, oem_cp: 950 },
+    LocaleEntry { name: "zh-TW", lcid: 0x0404, iso639: "zh", iso639_2: "zho", iso3166: "TW", eng_lang: "Chinese (Traditional)", native_lang: "中文(繁體)", eng_country: "Taiwan", parent: "zh-Hant", ansi_cp: 950, oem_cp: 950 },
+    LocaleEntry { name: "nl", lcid: 0x0013, iso639: "nl", iso639_2: "nld", iso3166: "", eng_lang: "Dutch", native_lang: "Nederlands", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "nl-NL", lcid: 0x0413, iso639: "nl", iso639_2: "nld", iso3166: "NL", eng_lang: "Dutch", native_lang: "Nederlands", eng_country: "Netherlands", parent: "nl", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "sv", lcid: 0x001D, iso639: "sv", iso639_2: "swe", iso3166: "", eng_lang: "Swedish", native_lang: "svenska", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "sv-SE", lcid: 0x041D, iso639: "sv", iso639_2: "swe", iso3166: "SE", eng_lang: "Swedish", native_lang: "svenska", eng_country: "Sweden", parent: "sv", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "da", lcid: 0x0006, iso639: "da", iso639_2: "dan", iso3166: "", eng_lang: "Danish", native_lang: "dansk", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "da-DK", lcid: 0x0406, iso639: "da", iso639_2: "dan", iso3166: "DK", eng_lang: "Danish", native_lang: "dansk", eng_country: "Denmark", parent: "da", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "fi", lcid: 0x000B, iso639: "fi", iso639_2: "fin", iso3166: "", eng_lang: "Finnish", native_lang: "suomi", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "fi-FI", lcid: 0x040B, iso639: "fi", iso639_2: "fin", iso3166: "FI", eng_lang: "Finnish", native_lang: "suomi", eng_country: "Finland", parent: "fi", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "nb", lcid: 0x0014, iso639: "nb", iso639_2: "nob", iso3166: "", eng_lang: "Norwegian Bokmål", native_lang: "norsk bokmål", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "nb-NO", lcid: 0x0414, iso639: "nb", iso639_2: "nob", iso3166: "NO", eng_lang: "Norwegian Bokmål", native_lang: "norsk bokmål", eng_country: "Norway", parent: "nb", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "cs", lcid: 0x0005, iso639: "cs", iso639_2: "ces", iso3166: "", eng_lang: "Czech", native_lang: "čeština", eng_country: "", parent: "", ansi_cp: 1250, oem_cp: 852 },
+    LocaleEntry { name: "cs-CZ", lcid: 0x0405, iso639: "cs", iso639_2: "ces", iso3166: "CZ", eng_lang: "Czech", native_lang: "čeština", eng_country: "Czechia", parent: "cs", ansi_cp: 1250, oem_cp: 852 },
+    LocaleEntry { name: "hu", lcid: 0x000E, iso639: "hu", iso639_2: "hun", iso3166: "", eng_lang: "Hungarian", native_lang: "magyar", eng_country: "", parent: "", ansi_cp: 1250, oem_cp: 852 },
+    LocaleEntry { name: "hu-HU", lcid: 0x040E, iso639: "hu", iso639_2: "hun", iso3166: "HU", eng_lang: "Hungarian", native_lang: "magyar", eng_country: "Hungary", parent: "hu", ansi_cp: 1250, oem_cp: 852 },
+    LocaleEntry { name: "ro", lcid: 0x0018, iso639: "ro", iso639_2: "ron", iso3166: "", eng_lang: "Romanian", native_lang: "română", eng_country: "", parent: "", ansi_cp: 1250, oem_cp: 852 },
+    LocaleEntry { name: "ro-RO", lcid: 0x0418, iso639: "ro", iso639_2: "ron", iso3166: "RO", eng_lang: "Romanian", native_lang: "română", eng_country: "Romania", parent: "ro", ansi_cp: 1250, oem_cp: 852 },
+    LocaleEntry { name: "th", lcid: 0x001E, iso639: "th", iso639_2: "tha", iso3166: "", eng_lang: "Thai", native_lang: "ไทย", eng_country: "", parent: "", ansi_cp: 874, oem_cp: 874 },
+    LocaleEntry { name: "th-TH", lcid: 0x041E, iso639: "th", iso639_2: "tha", iso3166: "TH", eng_lang: "Thai", native_lang: "ไทย", eng_country: "Thailand", parent: "th", ansi_cp: 874, oem_cp: 874 },
+    LocaleEntry { name: "vi", lcid: 0x002A, iso639: "vi", iso639_2: "vie", iso3166: "", eng_lang: "Vietnamese", native_lang: "Tiếng Việt", eng_country: "", parent: "", ansi_cp: 1258, oem_cp: 1258 },
+    LocaleEntry { name: "vi-VN", lcid: 0x042A, iso639: "vi", iso639_2: "vie", iso3166: "VN", eng_lang: "Vietnamese", native_lang: "Tiếng Việt", eng_country: "Vietnam", parent: "vi", ansi_cp: 1258, oem_cp: 1258 },
+    LocaleEntry { name: "id", lcid: 0x0021, iso639: "id", iso639_2: "ind", iso3166: "", eng_lang: "Indonesian", native_lang: "Indonesia", eng_country: "", parent: "", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "id-ID", lcid: 0x0421, iso639: "id", iso639_2: "ind", iso3166: "ID", eng_lang: "Indonesian", native_lang: "Indonesia", eng_country: "Indonesia", parent: "id", ansi_cp: 1252, oem_cp: 850 },
+    LocaleEntry { name: "ar", lcid: 0x0001, iso639: "ar", iso639_2: "ara", iso3166: "", eng_lang: "Arabic", native_lang: "العربية", eng_country: "", parent: "", ansi_cp: 1256, oem_cp: 720 },
+    LocaleEntry { name: "ar-SA", lcid: 0x0401, iso639: "ar", iso639_2: "ara", iso3166: "SA", eng_lang: "Arabic", native_lang: "العربية", eng_country: "Saudi Arabia", parent: "ar", ansi_cp: 1256, oem_cp: 720 },
+    LocaleEntry { name: "el", lcid: 0x0008, iso639: "el", iso639_2: "ell", iso3166: "", eng_lang: "Greek", native_lang: "Ελληνικά", eng_country: "", parent: "", ansi_cp: 1253, oem_cp: 737 },
+    LocaleEntry { name: "el-GR", lcid: 0x0408, iso639: "el", iso639_2: "ell", iso3166: "GR", eng_lang: "Greek", native_lang: "Ελληνικά", eng_country: "Greece", parent: "el", ansi_cp: 1253, oem_cp: 737 },
+    LocaleEntry { name: "bg", lcid: 0x0002, iso639: "bg", iso639_2: "bul", iso3166: "", eng_lang: "Bulgarian", native_lang: "български", eng_country: "", parent: "", ansi_cp: 1251, oem_cp: 866 },
+    LocaleEntry { name: "bg-BG", lcid: 0x0402, iso639: "bg", iso639_2: "bul", iso3166: "BG", eng_lang: "Bulgarian", native_lang: "български", eng_country: "Bulgaria", parent: "bg", ansi_cp: 1251, oem_cp: 866 },
+];
+
+unsafe fn read_wide_string_opt(ptr: *const u16) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while len < 512 && *ptr.add(len) != 0 {
+        len += 1;
+    }
+    let slice = std::slice::from_raw_parts(ptr, len);
+    Some(String::from_utf16_lossy(slice))
+}
+
+fn find_locale_by_name(name: &str) -> Option<&'static LocaleEntry> {
+    let trimmed = name.trim();
+    if let Some(exact) = LOCALE_TABLE
+        .iter()
+        .find(|e| e.name.eq_ignore_ascii_case(trimmed))
+    {
+        return Some(exact);
+    }
+    let norm = trimmed.replace('_', "-");
+    if let Some(exact) = LOCALE_TABLE
+        .iter()
+        .find(|e| e.name.eq_ignore_ascii_case(&norm))
+    {
+        return Some(exact);
+    }
+    if let Some(primary) = norm.split('-').next() {
+        if !primary.is_empty() {
+            return LOCALE_TABLE
+                .iter()
+                .find(|e| e.name.eq_ignore_ascii_case(primary));
+        }
+    }
+    None
+}
+
+fn find_locale_by_lcid(lcid: u32) -> &'static LocaleEntry {
+    let masked = lcid & 0xFFFF;
+    if masked == 0 || masked == 0x0400 || masked == 0x0800 || masked == 0x0C00 || masked == 0x1000 {
+        let cur = GuestLocale::current();
+        return find_locale_by_name(cur.locale_name).unwrap_or(&LOCALE_TABLE[2]);
+    }
+    if let Some(exact) = LOCALE_TABLE.iter().find(|e| e.lcid == masked) {
+        return exact;
+    }
+    let primary = masked & 0x03FF;
+    if let Some(base) = LOCALE_TABLE.iter().find(|e| (e.lcid & 0x03FF) == primary) {
+        return base;
+    }
+    &LOCALE_TABLE[2] // en-US fallback
+}
+
+fn is_valid_bcp47_like(name: &str) -> bool {
+    if name.is_empty() {
+        return true; // Invariant
+    }
+    if name.len() > 85 {
+        return false;
+    }
+    let mut parts = name.split('-');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if !(2..=3).contains(&first.len()) || !first.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    for part in parts {
+        if part.is_empty() || part.len() > 8 || !part.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn write_wide_z(dst: *mut u16, cch_dst: i32, text: &str) -> i32 {
+    let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    if cch_dst == 0 || dst.is_null() {
+        return utf16.len() as i32;
+    }
+    if (cch_dst as usize) < utf16.len() {
+        SetLastError(122); // ERROR_INSUFFICIENT_BUFFER
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(utf16.as_ptr(), dst, utf16.len());
+    utf16.len() as i32
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn IsValidLocaleName(lp_locale_name: *const u16) -> i32 {
+    let Some(name) = read_wide_string_opt(lp_locale_name) else {
+        return 0;
+    };
+    if find_locale_by_name(&name).is_some() || is_valid_bcp47_like(&name) {
+        1
+    } else {
+        0
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "win64" fn GetLocaleInfoEx(
-    _lp_locale_name: *const u16,
-    _lc_type: u32,
+    lp_locale_name: *const u16,
+    lc_type: u32,
     lp_lc_data: *mut u16,
     cch_data: i32,
 ) -> i32 {
-    let loc = GuestLocale::current();
-    let s: Vec<u16> = format!("{}\0", loc.locale_name).encode_utf16().collect();
-    if cch_data <= 0 || lp_lc_data.is_null() {
-        return s.len() as i32;
+    let entry = match read_wide_string_opt(lp_locale_name) {
+        None => {
+            let cur = GuestLocale::current();
+            find_locale_by_name(cur.locale_name).unwrap_or(&LOCALE_TABLE[2])
+        }
+        Some(name) => {
+            if name.is_empty() {
+                &LOCALE_TABLE[0] // Invariant
+            } else if let Some(found) = find_locale_by_name(&name) {
+                found
+            } else {
+                &LOCALE_TABLE[2]
+            }
+        }
+    };
+
+    const LOCALE_RETURN_NUMBER: u32 = 0x2000_0000;
+    let base_type = lc_type & 0x0000_FFFF;
+
+    if (lc_type & LOCALE_RETURN_NUMBER) != 0 {
+        if cch_data == 0 || lp_lc_data.is_null() {
+            return 2; // 2 WCHARs = 4 bytes (DWORD)
+        }
+        if cch_data < 2 {
+            SetLastError(122);
+            return 0;
+        }
+        let val: u32 = match base_type {
+            0x0001 | 0x0009 => entry.lcid,           // LOCALE_ILANGUAGE | LOCALE_IDEFAULTLANGUAGE
+            0x000B => entry.oem_cp,                  // LOCALE_IDEFAULTCODEPAGE
+            0x1004 => entry.ansi_cp,                 // LOCALE_IDEFAULTANSICODEPAGE
+            0x1011 => 10000,                         // LOCALE_IDEFAULTMACCODEPAGE
+            0x1012 => 37,                            // LOCALE_IDEFAULTEBCDICCODEPAGE
+            0x000D => if entry.iso3166 == "US" { 1 } else { 0 }, // LOCALE_IMEASURE
+            0x0011 => 2,                             // LOCALE_IDIGITS
+            0x0012 => 1,                             // LOCALE_ILZERO
+            0x0023 => if entry.iso3166 == "US" { 0 } else { 1 }, // LOCALE_ITIME
+            0x0071 => if entry.iso3166.is_empty() && !entry.name.is_empty() { 1 } else { 0 }, // LOCALE_INEUTRAL
+            0x100C => if entry.iso3166 == "US" { 6 } else { 0 }, // LOCALE_IFIRSTDAYOFWEEK
+            0x1010 => 1,                             // LOCALE_INEGNUMBER
+            0x1014 => 1,                             // LOCALE_IDIGITSUBSTITUTION
+            _ => 0,
+        };
+        std::ptr::write_unaligned(lp_lc_data as *mut u32, val);
+        return 2;
     }
-    let copy_len = s.len().min(cch_data as usize);
-    std::ptr::copy_nonoverlapping(s.as_ptr(), lp_lc_data, copy_len);
-    copy_len as i32
+
+    let owned_buf: String;
+    let text: &str = match base_type {
+        0x0001 => {
+            owned_buf = format!("{:04X}", entry.lcid);
+            &owned_buf
+        }
+        0x0002 | 0x0072 | 0x0073 => {
+            if entry.eng_country.is_empty() {
+                entry.eng_lang
+            } else {
+                owned_buf = format!("{} ({})", entry.eng_lang, entry.eng_country);
+                &owned_buf
+            }
+        }
+        0x0003 => entry.iso639_2,                    // LOCALE_SABBREVLANGNAME
+        0x0004 => entry.native_lang,                 // LOCALE_SNATIVELANGUAGENAME
+        0x0006 | 0x0008 | 0x1002 => entry.eng_country, // Country name
+        0x000E => if matches!(entry.iso639, "ru" | "de" | "fr" | "es" | "pt" | "it" | "pl" | "uk") { "," } else { "." },
+        0x000F => if matches!(entry.iso639, "ru" | "uk" | "fr" | "pl") { " " } else { "," },
+        0x0014 => if entry.iso639 == "ru" { "₽" } else { "$" },
+        0x001D => if entry.iso639 == "ru" { "." } else { "/" },
+        0x001E => ":",
+        0x001F => if entry.iso639 == "ru" { "dd.MM.yyyy" } else { "yyyy-MM-dd" },
+        0x0020 => "dddd, MMMM d, yyyy",
+        0x0059 => entry.iso639,                      // LOCALE_SISO639LANGNAME
+        0x005A => entry.iso3166,                     // LOCALE_SISO3166CTRYNAME
+        0x005C => entry.name,                        // LOCALE_SNAME
+        0x0067 => entry.iso639_2,                    // LOCALE_SISO639LANGNAME2
+        0x006D => entry.parent,                      // LOCALE_SPARENT
+        0x006F | 0x1001 => entry.eng_lang,           // LOCALE_SLOCALIZEDLANGUAGENAME | LOCALE_SENGLISHLANGUAGENAME
+        0x1003 => "HH:mm:ss",                        // LOCALE_STIMEFORMAT
+        0x1004 => {
+            owned_buf = entry.ansi_cp.to_string();
+            &owned_buf
+        }
+        _ => entry.name,
+    };
+
+    write_wide_z(lp_lc_data, cch_data, text)
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn GetLocaleInfoW(
-    _lcid: u32,
-    _lc_type: u32,
+    lcid: u32,
+    lc_type: u32,
     lp_lc_data: *mut u16,
     cch_data: i32,
 ) -> i32 {
-    GetLocaleInfoEx(std::ptr::null(), _lc_type, lp_lc_data, cch_data)
+    let entry = find_locale_by_lcid(lcid);
+    let wide: Vec<u16> = entry.name.encode_utf16().chain(std::iter::once(0)).collect();
+    GetLocaleInfoEx(wide.as_ptr(), lc_type, lp_lc_data, cch_data)
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn GetLocaleInfoA(
-    _lcid: u32,
-    _lc_type: u32,
+    lcid: u32,
+    lc_type: u32,
     lp_lc_data: *mut libc::c_char,
     cch_data: i32,
 ) -> i32 {
-    let loc = GuestLocale::current();
-    let s = format!("{}\0", loc.locale_name);
-    if cch_data <= 0 || lp_lc_data.is_null() {
-        return s.len() as i32;
+    const LOCALE_RETURN_NUMBER: u32 = 0x2000_0000;
+    if (lc_type & LOCALE_RETURN_NUMBER) != 0 {
+        let mut val: u32 = 0;
+        let _ = GetLocaleInfoW(lcid, lc_type, &mut val as *mut u32 as *mut u16, 2);
+        if cch_data == 0 || lp_lc_data.is_null() {
+            return 4;
+        }
+        if cch_data < 4 {
+            SetLastError(122);
+            return 0;
+        }
+        std::ptr::write_unaligned(lp_lc_data as *mut u32, val);
+        return 4;
     }
-    let copy_len = s.len().min(cch_data as usize);
-    std::ptr::copy_nonoverlapping(s.as_ptr() as *const libc::c_char, lp_lc_data, copy_len);
-    copy_len as i32
+    let needed = GetLocaleInfoW(lcid, lc_type, std::ptr::null_mut(), 0);
+    if needed <= 0 {
+        return 0;
+    }
+    let mut wbuf = vec![0u16; needed as usize];
+    let written = GetLocaleInfoW(lcid, lc_type, wbuf.as_mut_ptr(), needed);
+    if written <= 0 {
+        return 0;
+    }
+    let s = String::from_utf16_lossy(&wbuf[..(written as usize).saturating_sub(1)]);
+    let mut bytes = s.into_bytes();
+    bytes.push(0);
+    if cch_data <= 0 || lp_lc_data.is_null() {
+        return bytes.len() as i32;
+    }
+    if (cch_data as usize) < bytes.len() {
+        SetLastError(122);
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const libc::c_char, lp_lc_data, bytes.len());
+    bytes.len() as i32
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetUserPreferredUILanguages(
+    _dw_flags: u32,
+    pul_num_languages: *mut u32,
+    pwsz_languages_buffer: *mut u16,
+    pcch_languages_buffer: *mut u32,
+) -> i32 {
+    let loc = GuestLocale::current();
+    let mut wide: Vec<u16> = loc.locale_name.encode_utf16().collect();
+    wide.push(0);
+    wide.push(0); // double-null terminated
+    if !pul_num_languages.is_null() {
+        *pul_num_languages = 1;
+    }
+    if pcch_languages_buffer.is_null() {
+        SetLastError(87);
+        return 0;
+    }
+    let required = wide.len() as u32;
+    let cap = *pcch_languages_buffer;
+    *pcch_languages_buffer = required;
+    if pwsz_languages_buffer.is_null() || cap == 0 {
+        return 1;
+    }
+    if cap < required {
+        SetLastError(122);
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(wide.as_ptr(), pwsz_languages_buffer, wide.len());
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetThreadPreferredUILanguages(
+    dw_flags: u32,
+    pul_num_languages: *mut u32,
+    pwsz_languages_buffer: *mut u16,
+    pcch_languages_buffer: *mut u32,
+) -> i32 {
+    GetUserPreferredUILanguages(
+        dw_flags,
+        pul_num_languages,
+        pwsz_languages_buffer,
+        pcch_languages_buffer,
+    )
 }
 
 #[no_mangle]
@@ -8492,8 +9087,17 @@ pub unsafe extern "win64" fn WaitForSingleObject(h_handle: u64, dw_milliseconds:
             return WAIT_TIMEOUT;
         }
         if dw_milliseconds == 0xFFFFFFFF {
+            let watch = std::env::var_os("RINE_DEADLOCK_WATCH").is_some();
             while !state.0 {
-                state = cvar.wait(state).unwrap();
+                if watch {
+                    let (new_state, res) = cvar.wait_timeout(state, std::time::Duration::from_secs(5)).unwrap();
+                    state = new_state;
+                    if res.timed_out() && !state.0 {
+                        println!("[RINE DEADLOCK WATCH] tid={} waiting >5s on Event handle=0x{:X}", GetCurrentThreadId(), h_handle);
+                    }
+                } else {
+                    state = cvar.wait(state).unwrap();
+                }
             }
             if !state.1 {
                 state.0 = false;
@@ -8533,8 +9137,17 @@ pub unsafe extern "win64" fn WaitForSingleObject(h_handle: u64, dw_milliseconds:
             return WAIT_TIMEOUT;
         }
         if dw_milliseconds == 0xFFFFFFFF {
+            let watch = std::env::var_os("RINE_DEADLOCK_WATCH").is_some();
             while state.count == 0 {
-                state = cvar.wait(state).unwrap();
+                if watch {
+                    let (new_state, res) = cvar.wait_timeout(state, std::time::Duration::from_secs(5)).unwrap();
+                    state = new_state;
+                    if res.timed_out() && state.count == 0 {
+                        println!("[RINE DEADLOCK WATCH] tid={} waiting >5s on Semaphore handle=0x{:X} (max={})", GetCurrentThreadId(), h_handle, state.max_count);
+                    }
+                } else {
+                    state = cvar.wait(state).unwrap();
+                }
             }
             state.count -= 1;
             return WAIT_OBJECT_0;
@@ -8576,8 +9189,17 @@ pub unsafe extern "win64" fn WaitForSingleObject(h_handle: u64, dw_milliseconds:
             return WAIT_TIMEOUT;
         }
         if dw_milliseconds == 0xFFFFFFFF {
+            let watch = std::env::var_os("RINE_DEADLOCK_WATCH").is_some();
             while state.owner != 0 {
-                state = cvar.wait(state).unwrap();
+                if watch {
+                    let (new_state, res) = cvar.wait_timeout(state, std::time::Duration::from_secs(5)).unwrap();
+                    state = new_state;
+                    if res.timed_out() && state.owner != 0 {
+                        println!("[RINE DEADLOCK WATCH] tid={} waiting >5s on Mutex handle=0x{:X} (owner={})", GetCurrentThreadId(), h_handle, state.owner);
+                    }
+                } else {
+                    state = cvar.wait(state).unwrap();
+                }
             }
             state.owner = current_tid;
             state.count = 1;
@@ -8617,8 +9239,17 @@ pub unsafe extern "win64" fn WaitForSingleObject(h_handle: u64, dw_milliseconds:
             return WAIT_TIMEOUT;
         }
         if dw_milliseconds == 0xFFFFFFFF {
+            let watch = std::env::var_os("RINE_DEADLOCK_WATCH").is_some();
             while !state.signaled {
-                state = cvar.wait(state).unwrap();
+                if watch {
+                    let (new_state, res) = cvar.wait_timeout(state, std::time::Duration::from_secs(5)).unwrap();
+                    state = new_state;
+                    if res.timed_out() && !state.signaled {
+                        println!("[RINE DEADLOCK WATCH] tid={} waiting >5s on Timer handle=0x{:X}", GetCurrentThreadId(), h_handle);
+                    }
+                } else {
+                    state = cvar.wait(state).unwrap();
+                }
             }
             if !state.manual_reset {
                 state.signaled = false;
@@ -10199,6 +10830,19 @@ pub unsafe extern "win64" fn GetProcAddress(
         }
     }
 
+    if h_module == crate::dlls::steam_bridge::STEAMCLIENT_BRIDGE_BASE
+        || (crate::dlls::steam_bridge::is_bridge_enabled()
+            && (mod_upper.starts_with("STEAMCLIENT") || mod_upper.starts_with("LSTEAMCLIENT")))
+    {
+        if let Some(addr) = crate::dlls::steam_bridge::resolve_steamclient_symbol(&func_name) {
+            println!(
+                "[RINE STEAM BRIDGE BIND] hmodule=0x{:016X} module='{}' symbol='{}' addr=0x{:016X}",
+                h_module, module_name, func_name, addr
+            );
+            return addr;
+        }
+    }
+
     if module_name.to_ascii_lowercase().starts_with("cfgmgr32")
         || module_name.to_ascii_lowercase().starts_with("setupapi")
     {
@@ -10539,11 +11183,23 @@ pub unsafe extern "win64" fn EnumSystemLocalesEx(
     lParam: usize,
     _lpReserved: *mut std::ffi::c_void,
 ) -> i32 {
+    const LOCALE_NEUTRALDATA: u32 = 0x0000_0010;
+    const LOCALE_SPECIFICDATA: u32 = 0x0000_0020;
     if let Some(cb) = lpLocaleEnumProcEx {
-        let locales = ["en-US\0", "ru-RU\0"];
-        for loc in &locales {
-            let wide: Vec<u16> = loc.encode_utf16().collect();
-            if cb(wide.as_ptr(), dwFlags, lParam) == 0 {
+        for entry in LOCALE_TABLE {
+            if entry.name.is_empty() {
+                continue;
+            }
+            let is_neutral = entry.iso3166.is_empty();
+            if (dwFlags & LOCALE_NEUTRALDATA) != 0 && (dwFlags & LOCALE_SPECIFICDATA) == 0 && !is_neutral {
+                continue;
+            }
+            if (dwFlags & LOCALE_SPECIFICDATA) != 0 && (dwFlags & LOCALE_NEUTRALDATA) == 0 && is_neutral {
+                continue;
+            }
+            let wide: Vec<u16> = entry.name.encode_utf16().chain(std::iter::once(0)).collect();
+            let item_flags = if is_neutral { LOCALE_NEUTRALDATA } else { LOCALE_SPECIFICDATA };
+            if cb(wide.as_ptr(), item_flags, lParam) == 0 {
                 break;
             }
         }
@@ -11113,22 +11769,26 @@ pub unsafe extern "win64" fn K32GetPerformanceInfo(p_performance_information: *m
 
 #[no_mangle]
 pub unsafe extern "win64" fn LCIDToLocaleName(
-    _locale: u32,
+    locale: u32,
     lp_name: *mut u16,
     cch_name: i32,
     _dw_flags: u32,
 ) -> i32 {
-    let name: [u16; 6] = [b'e' as u16, b'n' as u16, b'-' as u16, b'U' as u16, b'S' as u16, 0];
-    if !lp_name.is_null() && cch_name >= 6 {
-        std::ptr::copy_nonoverlapping(name.as_ptr(), lp_name, 6);
-        6
-    } else {
-        6
-    }
+    let entry = find_locale_by_lcid(locale);
+    write_wide_z(lp_name, cch_name, entry.name)
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn LocaleNameToLCID(_lp_name: *const u16, _dw_flags: u32) -> u32 {
+pub unsafe extern "win64" fn LocaleNameToLCID(lp_name: *const u16, _dw_flags: u32) -> u32 {
+    let Some(name) = read_wide_string_opt(lp_name) else {
+        return GuestLocale::current().lcid;
+    };
+    if name.is_empty() {
+        return 0x007F; // LOCALE_INVARIANT
+    }
+    if let Some(entry) = find_locale_by_name(&name) {
+        return entry.lcid;
+    }
     0x0409
 }
 
@@ -13332,6 +13992,44 @@ mod tests {
             assert_eq!(res2, 1);
             assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 0);
             assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 48);
+        }
+    }
+
+    #[test]
+    fn test_locale_nls_apis() {
+        unsafe {
+            let ru: Vec<u16> = "ru-RU\0".encode_utf16().collect();
+            let ko: Vec<u16> = "ko-KR\0".encode_utf16().collect();
+            let inv: Vec<u16> = "\0".encode_utf16().collect();
+            assert_eq!(IsValidLocaleName(ru.as_ptr()), 1);
+            assert_eq!(IsValidLocaleName(ko.as_ptr()), 1);
+            assert_eq!(IsValidLocaleName(inv.as_ptr()), 1);
+            assert_eq!(IsValidLocaleName(std::ptr::null()), 0);
+
+            assert_eq!(LocaleNameToLCID(ru.as_ptr(), 0), 0x0419);
+            assert_eq!(LocaleNameToLCID(ko.as_ptr(), 0), 0x0412);
+            assert_eq!(LocaleNameToLCID(inv.as_ptr(), 0), 0x007F);
+
+            let mut wbuf = [0u16; 64];
+            let n = LCIDToLocaleName(0x0419, wbuf.as_mut_ptr(), 64, 0);
+            assert_eq!(n, 6);
+            assert_eq!(String::from_utf16_lossy(&wbuf[..5]), "ru-RU");
+
+            // LOCALE_SISO639LANGNAME (0x59)
+            let len_iso = GetLocaleInfoEx(ru.as_ptr(), 0x0059, wbuf.as_mut_ptr(), 64);
+            assert_eq!(len_iso, 3);
+            assert_eq!(String::from_utf16_lossy(&wbuf[..2]), "ru");
+
+            // LOCALE_RETURN_NUMBER | LOCALE_ILANGUAGE (0x20000001)
+            let mut num_val: u32 = 0;
+            let len_num = GetLocaleInfoEx(
+                ru.as_ptr(),
+                0x2000_0001,
+                &mut num_val as *mut u32 as *mut u16,
+                2,
+            );
+            assert_eq!(len_num, 2);
+            assert_eq!(num_val, 0x0419);
         }
     }
 }

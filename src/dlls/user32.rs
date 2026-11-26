@@ -1599,6 +1599,28 @@ fn poll_and_enqueue_sdl_event(sdl_event: &[u8; 56]) {
                 pt_x: wx + x,
                 pt_y: wy + y,
             });
+
+            // 3. WM_POINTERUPDATE if EnableMouseInPointer(TRUE) was called
+            if MOUSE_IN_POINTER_ENABLED.load(Ordering::Relaxed) {
+                let mut pflags = 0x0002_2002u32; // POINTER_FLAG_UPDATE | PRIMARY | INRANGE
+                if (state & 1) != 0 {
+                    pflags |= 0x0000_0014; // FIRSTBUTTON | INCONTACT
+                }
+                if (state & 4) != 0 {
+                    pflags |= 0x0000_0020; // SECONDBUTTON
+                }
+                let ptr_wp = update_mouse_pointer_info(target_hwnd, wx + x, wy + y, tick, pflags, 0);
+                let ptr_lp = (((wy + y) as u64 & 0xFFFF) << 16) | ((wx + x) as u64 & 0xFFFF);
+                input.message_queue.push_back(WinMsg {
+                    hwnd: target_hwnd,
+                    message: 0x0245, // WM_POINTERUPDATE
+                    w_param: ptr_wp,
+                    l_param: ptr_lp,
+                    time: tick,
+                    pt_x: wx + x,
+                    pt_y: wy + y,
+                });
+            }
         }
         0x401 => {
             // SDL_MOUSEBUTTONDOWN
@@ -1662,6 +1684,27 @@ fn poll_and_enqueue_sdl_event(sdl_event: &[u8; 56]) {
                     pt_x: wx + x,
                     pt_y: wy + y,
                 });
+
+                // 3. WM_POINTERDOWN if EnableMouseInPointer(TRUE) was called
+                if MOUSE_IN_POINTER_ENABLED.load(Ordering::Relaxed) {
+                    let (pflags, change) = match button {
+                        1 => (0x0001_2016u32, 1), // DOWN | PRIMARY | FIRSTBUTTON | INCONTACT | INRANGE
+                        3 => (0x0001_2022u32, 3), // DOWN | PRIMARY | SECONDBUTTON | INRANGE
+                        2 => (0x0001_2042u32, 5), // DOWN | PRIMARY | THIRDBUTTON | INRANGE
+                        _ => (0x0001_2002u32, 0),
+                    };
+                    let ptr_wp = update_mouse_pointer_info(target_hwnd, wx + x, wy + y, tick, pflags, change);
+                    let ptr_lp = (((wy + y) as u64 & 0xFFFF) << 16) | ((wx + x) as u64 & 0xFFFF);
+                    input.message_queue.push_back(WinMsg {
+                        hwnd: target_hwnd,
+                        message: 0x0246, // WM_POINTERDOWN
+                        w_param: ptr_wp,
+                        l_param: ptr_lp,
+                        time: tick,
+                        pt_x: wx + x,
+                        pt_y: wy + y,
+                    });
+                }
             }
         }
         0x402 => {
@@ -1725,6 +1768,28 @@ fn poll_and_enqueue_sdl_event(sdl_event: &[u8; 56]) {
                     pt_x: wx + x,
                     pt_y: wy + y,
                 });
+
+                // 3. WM_POINTERUP if EnableMouseInPointer(TRUE) was called
+                if MOUSE_IN_POINTER_ENABLED.load(Ordering::Relaxed) {
+                    let change = match button {
+                        1 => 2, // POINTER_CHANGE_FIRSTBUTTON_UP
+                        3 => 4, // POINTER_CHANGE_SECONDBUTTON_UP
+                        2 => 6, // POINTER_CHANGE_THIRDBUTTON_UP
+                        _ => 0,
+                    };
+                    let pflags = 0x0004_2002u32; // UP | PRIMARY | INRANGE
+                    let ptr_wp = update_mouse_pointer_info(target_hwnd, wx + x, wy + y, tick, pflags, change);
+                    let ptr_lp = (((wy + y) as u64 & 0xFFFF) << 16) | ((wx + x) as u64 & 0xFFFF);
+                    input.message_queue.push_back(WinMsg {
+                        hwnd: target_hwnd,
+                        message: 0x0247, // WM_POINTERUP
+                        w_param: ptr_wp,
+                        l_param: ptr_lp,
+                        time: tick,
+                        pt_x: wx + x,
+                        pt_y: wy + y,
+                    });
+                }
             }
         }
         0x403 => {
@@ -2379,21 +2444,6 @@ pub unsafe extern "win64" fn DispatchMessageW_System(lp_msg: *const u8) -> isize
 
         let wndproc = get_wndproc_for_hwnd(hwnd);
         if wndproc > 0x10000 && wndproc < 0x7FFFFFFFFFFF {
-            if wndproc == 0x1811BDE30 {
-                let active_ptr = (wndproc + 0x10B4EAD) as *mut u8;
-                let susp_ptr = (wndproc + 0x10B4EA8) as *mut u8;
-                let old_act = *active_ptr;
-                let old_susp = *susp_ptr;
-                if old_act == 0 || old_susp != 0 {
-                    println!(
-                        "[USER32 UNITY] Enforcing active state: active_flag {} -> 1, susp_flag {} -> 0",
-                        old_act, old_susp
-                    );
-                    *active_ptr = 1;
-                    *susp_ptr = 0;
-                }
-            }
-
             let wndproc_fn: unsafe extern "win64" fn(u64, u32, u64, u64) -> isize =
                 std::mem::transmute(wndproc);
             return wndproc_fn(hwnd, msg, wparam, lparam);
@@ -3147,10 +3197,82 @@ pub unsafe extern "win64" fn UnregisterDeviceNotification(h_dev_notify: usize) -
     1
 }
 
+static MOUSE_IN_POINTER_ENABLED: AtomicBool = AtomicBool::new(false);
+static POINTER_FRAME_ID: AtomicU32 = AtomicU32::new(1);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PointerInfo {
+    pub pointer_type: u32,
+    pub pointer_id: u32,
+    pub frame_id: u32,
+    pub pointer_flags: u32,
+    pub source_device: u64,
+    pub hwnd_target: u64,
+    pub pt_pixel_location: Point,
+    pub pt_himetric_location: Point,
+    pub pt_pixel_location_raw: Point,
+    pub pt_himetric_location_raw: Point,
+    pub dw_time: u32,
+    pub history_count: u32,
+    pub input_data: i32,
+    pub dw_key_states: u32,
+    pub performance_count: u64,
+    pub button_change_type: i32,
+    pub _pad: u32,
+}
+
+static CURRENT_POINTER_INFO: Mutex<PointerInfo> = Mutex::new(PointerInfo {
+    pointer_type: 4, // PT_MOUSE
+    pointer_id: 1,
+    frame_id: 1,
+    pointer_flags: 0x0002_2002, // UPDATE | PRIMARY | INRANGE
+    source_device: 0x00010001,
+    hwnd_target: 0,
+    pt_pixel_location: Point { x: 0, y: 0 },
+    pt_himetric_location: Point { x: 0, y: 0 },
+    pt_pixel_location_raw: Point { x: 0, y: 0 },
+    pt_himetric_location_raw: Point { x: 0, y: 0 },
+    dw_time: 0,
+    history_count: 1,
+    input_data: 0,
+    dw_key_states: 0,
+    performance_count: 0,
+    button_change_type: 0,
+    _pad: 0,
+});
+
+fn update_mouse_pointer_info(
+    hwnd: u64,
+    screen_x: i32,
+    screen_y: i32,
+    tick: u32,
+    pointer_flags: u32,
+    button_change_type: i32,
+) -> u64 {
+    let frame_id = POINTER_FRAME_ID.fetch_add(1, Ordering::Relaxed);
+    let pt = Point { x: screen_x, y: screen_y };
+    if let Ok(mut guard) = CURRENT_POINTER_INFO.lock() {
+        guard.pointer_type = 4; // PT_MOUSE
+        guard.pointer_id = 1;
+        guard.frame_id = frame_id;
+        guard.pointer_flags = pointer_flags;
+        guard.source_device = 0x00010001;
+        guard.hwnd_target = hwnd;
+        guard.pt_pixel_location = pt;
+        guard.pt_pixel_location_raw = pt;
+        guard.dw_time = tick;
+        guard.history_count = 1;
+        guard.button_change_type = button_change_type;
+    }
+    let msg_flags = (pointer_flags & 0xFFFF) as u64;
+    1u64 | (msg_flags << 16)
+}
+
 #[no_mangle]
-pub unsafe extern "win64" fn GetPointerType(_pointer_id: u32, pointer_type: *mut u32) -> i32 {
+pub unsafe extern "win64" fn GetPointerType(pointer_id: u32, pointer_type: *mut u32) -> i32 {
     if !pointer_type.is_null() {
-        *pointer_type = 2; // PT_TOUCH
+        *pointer_type = if pointer_id == 1 { 4 /* PT_MOUSE */ } else { 2 /* PT_TOUCH */ };
     }
     1
 }
@@ -3214,9 +3336,19 @@ pub unsafe extern "win64" fn RegisterPointerDeviceNotifications(
 
 #[no_mangle]
 pub unsafe extern "win64" fn GetPointerInfo(
-    _pointer_id: u32,
-    _pointer_info: *mut std::ffi::c_void,
+    pointer_id: u32,
+    pointer_info: *mut std::ffi::c_void,
 ) -> i32 {
+    if pointer_id == 1 && !pointer_info.is_null() && (pointer_info as usize) > 0x10000 {
+        if let Ok(guard) = CURRENT_POINTER_INFO.lock() {
+            std::ptr::copy_nonoverlapping(
+                &*guard as *const PointerInfo as *const u8,
+                pointer_info as *mut u8,
+                std::mem::size_of::<PointerInfo>(),
+            );
+            return 1;
+        }
+    }
     0
 }
 
@@ -4863,7 +4995,7 @@ pub unsafe extern "win64" fn MonitorFromWindow(_hwnd: u64, _dw_flags: u32) -> us
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn MonitorFromPoint(_pt_x: i32, _pt_y: i32, _dw_flags: u32) -> usize {
+pub unsafe extern "win64" fn MonitorFromPoint(_pt: u64, _dw_flags: u32) -> usize {
     0x00010001
 }
 
@@ -5359,12 +5491,15 @@ pub unsafe extern "win64" fn UnregisterPointerInputTarget(_hwnd: usize, _pointer
 
 #[no_mangle]
 pub unsafe extern "win64" fn IsMouseInPointerEnabled() -> i32 {
-    0 // FALSE
+    if MOUSE_IN_POINTER_ENABLED.load(Ordering::Relaxed) { 1 } else { 0 }
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn EnableMouseInPointer(_f_enable: i32) -> i32 {
-    0 // FALSE
+pub unsafe extern "win64" fn EnableMouseInPointer(f_enable: i32) -> i32 {
+    let enabled = f_enable != 0;
+    MOUSE_IN_POINTER_ENABLED.store(enabled, Ordering::Relaxed);
+    println!("[USER32] EnableMouseInPointer({}) -> TRUE", enabled);
+    1 // TRUE
 }
 
 pub const WM_PAINT: u32 = 0x000F;
@@ -5546,9 +5681,11 @@ pub unsafe extern "win64" fn SetRect(
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn PtInRect(lprc: *const Rect, pt_x: i32, pt_y: i32) -> i32 {
+pub unsafe extern "win64" fn PtInRect(lprc: *const Rect, pt: u64) -> i32 {
     if !lprc.is_null() {
         let r = &*lprc;
+        let pt_x = (pt & 0xFFFF_FFFF) as i32;
+        let pt_y = ((pt >> 32) & 0xFFFF_FFFF) as i32;
         if pt_x >= r.left && pt_x < r.right && pt_y >= r.top && pt_y < r.bottom {
             1
         } else {
