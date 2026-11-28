@@ -52,6 +52,20 @@ pub unsafe extern "win64" fn WinHttpGetIEProxyConfigForCurrentUser(
 }
 
 #[no_mangle]
+pub unsafe extern "win64" fn WinHttpGetDefaultProxyConfiguration(
+    p_proxy_info: *mut WINHTTP_PROXY_INFO,
+) -> i32 {
+    if p_proxy_info.is_null() {
+        crate::dlls::kernel32::SetLastError(87);
+        return 0;
+    }
+    (*p_proxy_info).dwAccessType = 1; // WINHTTP_ACCESS_TYPE_NO_PROXY
+    (*p_proxy_info).lpszProxy = std::ptr::null_mut();
+    (*p_proxy_info).lpszProxyBypass = std::ptr::null_mut();
+    1
+}
+
+#[no_mangle]
 pub unsafe extern "win64" fn WinHttpOpen(
     _psz_agent: *const u16,
     _dw_access_type: u32,

@@ -58,8 +58,64 @@ pub unsafe extern "win64" fn SelectObject(hdc: HDC, hobj: HGDIOBJ) -> HGDIOBJ {
 }
 
 pub unsafe extern "win64" fn DeleteObject(hobj: HGDIOBJ) -> i32 {
+    if remove_region(hobj as usize) {
+        return 1;
+    }
     println!("[GDI32] DeleteObject: HGDIOBJ=0x{:X} -> 1", hobj);
     1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetStockObject(i: i32) -> HGDIOBJ {
+    0x50000u64 + (i as u32 as u64 & 0xFF)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CreateSolidBrush(_color: u32) -> HGDIOBJ {
+    0x51001
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CreateFontIndirectW(_lplf: *const u8) -> HGDIOBJ {
+    0x52001
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetObjectW(_h: HGDIOBJ, c: i32, pv: *mut u8) -> i32 {
+    if !pv.is_null() && c > 0 {
+        std::ptr::write_bytes(pv, 0, c as usize);
+    }
+    c
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CreateDCW(
+    _pwsz_driver: *const u16,
+    _pwsz_device: *const u16,
+    _psz_port: *const u16,
+    _pdm: *const u8,
+) -> HDC {
+    CreateCompatibleDC(0)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CreateDCA(
+    _psz_driver: *const u8,
+    _psz_device: *const u8,
+    _psz_port: *const u8,
+    _pdm: *const u8,
+) -> HDC {
+    CreateCompatibleDC(0)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CreateICW(
+    _psz_driver: *const u16,
+    _psz_device: *const u16,
+    _psz_port: *const u16,
+    _pdm: *const u8,
+) -> HDC {
+    CreateCompatibleDC(0)
 }
 
 pub unsafe extern "win64" fn CreateDIBSection(
@@ -303,6 +359,99 @@ pub unsafe extern "win64" fn GetObjectA(
 #[no_mangle]
 pub unsafe extern "win64" fn DeleteDC(_hdc: usize) -> i32 {
     1 // TRUE
+}
+
+static NEXT_RGN_HANDLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0x7001_0000);
+static GDI_REGIONS: std::sync::Mutex<Option<std::collections::HashMap<usize, (i32, i32, i32, i32)>>> =
+    std::sync::Mutex::new(None);
+
+fn insert_rect_rgn(x1: i32, y1: i32, x2: i32, y2: i32) -> usize {
+    let handle = NEXT_RGN_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let rect = (x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2));
+    if let Ok(mut guard) = GDI_REGIONS.lock() {
+        guard.get_or_insert_with(std::collections::HashMap::new).insert(handle, rect);
+    }
+    handle
+}
+
+fn remove_region(handle: usize) -> bool {
+    if handle < 0x7001_0000 {
+        return false;
+    }
+    if let Ok(mut guard) = GDI_REGIONS.lock() {
+        if let Some(map) = guard.as_mut() {
+            return map.remove(&handle).is_some();
+        }
+    }
+    false
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> usize {
+    insert_rect_rgn(x1, y1, x2, y2)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CreateRoundRectRgn(
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    _w: i32,
+    _h: i32,
+) -> usize {
+    insert_rect_rgn(x1, y1, x2, y2)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn PtInRegion(hrgn: usize, x: i32, y: i32) -> i32 {
+    if let Ok(guard) = GDI_REGIONS.lock() {
+        if let Some(map) = guard.as_ref() {
+            if let Some(&(l, t, r, b)) = map.get(&hrgn) {
+                return if x >= l && x < r && y >= t && y < b { 1 } else { 0 };
+            }
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetTextExtentPoint32W(
+    _hdc: usize,
+    _lp_string: *const u16,
+    c: i32,
+    psizl: *mut i32,
+) -> i32 {
+    if !psizl.is_null() {
+        *psizl = c.max(0) * 8;
+        *psizl.add(1) = 16;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetBkColor(_hdc: usize, _color: u32) -> u32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetBkMode(_hdc: usize, _mode: i32) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetTextAlign(_hdc: usize, _align: u32) -> u32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetTextColor(_hdc: usize, _color: u32) -> u32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn TextOutW(_hdc: usize, _x: i32, _y: i32, _lp_string: *const u16, _c: i32) -> i32 {
+    1
 }
 
 #[cfg(test)]

@@ -106,6 +106,48 @@ pub unsafe extern "win64" fn SetupDiGetClassDevsW(
     handle
 }
 
+#[no_mangle]
+pub unsafe extern "win64" fn SetupDiGetClassDevsExW(
+    class_guid: *const u8,
+    enumerator: *const u16,
+    parent: usize,
+    flags: u32,
+    _device_info_set: usize,
+    _machine_name: *const u16,
+    _reserved: usize,
+) -> usize {
+    SetupDiGetClassDevsW(class_guid, enumerator, parent, flags)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetupDiGetClassDevsExA(
+    class_guid: *const u8,
+    enumerator: *const u8,
+    parent: usize,
+    flags: u32,
+    _device_info_set: usize,
+    _machine_name: *const u8,
+    _reserved: usize,
+) -> usize {
+    SetupDiGetClassDevsA(class_guid, enumerator, parent, flags)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetupGetInfDriverStoreLocationW(
+    _file_name: *const u16,
+    _alternate_platform_info: usize,
+    _locale_name: *const u16,
+    _return_buffer: *mut u16,
+    _return_buffer_size: u32,
+    required_size: *mut u32,
+) -> i32 {
+    if !required_size.is_null() {
+        *required_size = 0;
+    }
+    crate::dlls::kernel32::SetLastError(2); // ERROR_FILE_NOT_FOUND
+    0 // FALSE
+}
+
 pub unsafe extern "win64" fn SetupDiGetClassDevsA(
     class_guid: *const u8,
     _enumerator: *const u8,

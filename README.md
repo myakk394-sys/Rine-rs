@@ -23,7 +23,7 @@
 <a name="english"></a>
 ## English
 
-> **Notice:** Rine is in an **active experimental stage**. It is a fast, native in-process Win64 compatibility layer for Linux x86_64, actively tested on real Godot, Unity (Mono), and Unity 6 games.
+> **Notice:** Rine is in an **active experimental stage**. It is a fast, native in-process Win64 compatibility layer for Linux x86_64, actively tested on real Godot, Unity (Mono), and Unity 6 games, with **Unreal Engine 4** support currently in early development.
 
 ### Overview
 
@@ -40,6 +40,7 @@ Unlike traditional Wine/Proton setups that rely on a mandatory `wineserver` daem
 - **Steamworks Bridge & Matchmaking / Networking:** Hybrid Steamworks layer (`steam_api64.dll` -> native Linux `steamclient.so`) with SteamStub 3.1 unpacking, `SteamAPI_ManualDispatch` (`703` CallResults + raw callbacks), local `ISteamMatchmaking` lobbies, and `ISteamNetworkingSockets` / `ISteamNetworkingUtils` P2P/Relay support.
 - **Win32 NLS, Registry & Persistence:** Full Win32 locale/NLS tables (`IsValidLocaleName`, `GetLocaleInfoEx`, `EnumSystemLocalesEx`, `LCIDToLocaleName`, `GetUserPreferredUILanguages`), JSON-backed Windows Registry (`advapi32`) supporting 8-byte `REG_DWORD` `double` values used by Unity `PlayerPrefs.SetFloat`, and Landlock LSM filesystem sandboxing (`RineVfs`).
 - **Audio & Input:** Low-latency WASAPI over PipeWire/PulseAudio; full Win32 keyboard, mouse, and raw input message loop (`PeekMessageW`, `GetRawInputData`, `WH_MOUSE_LL`, cursor clipping/warping).
+- **Unreal Engine 4 & Media Foundation (In Development):** Experimental UE4 (`-dx11`) support including Media Foundation video playback (`mf.dll`/`mfplat.dll` via host `ffmpeg`) and multi-client WASAPI; many UE4 subsystems are still under active development and not yet fully functional.
 
 ### Benchmarks (NVIDIA GeForce RTX 3060, Linux)
 
@@ -65,6 +66,12 @@ Unlike traditional Wine/Proton setups that rely on a mandatory `wineserver` daem
 | **Peak CPU Spike** | 280.5% | **142.0%** | **~2x lower peak spike** |
 | **GPU Power Draw** | 57.1 W | **48.3 W** | **~9 W lower power** |
 
+#### 3. *Zompiercer* (Unity Mono, Qualitative Comparison)
+
+| Metric | Proton Experimental | Rine Win64 Native | Notes |
+| :--- | :--- | :--- | :--- |
+| **FPS & Frame Pacing** | **Higher FPS & smoother** | Lower FPS / less smooth | Exact FPS numbers were not recorded; in direct comparison, Proton currently leads in both framerate and smoothness. |
+
 ### Compatibility Status
 
 | Title | Engine | Status | Notes |
@@ -72,6 +79,8 @@ Unlike traditional Wine/Proton setups that rely on a mandatory `wineserver` daem
 | **That's Not My Neighbor** | Godot Engine | **Fully Working** | Stable rendering, audio, and input. |
 | **Cuphead** | Unity (Mono) | **Fully Working** | Smooth 60 FPS gameplay, WASAPI audio, persistent keybinds. |
 | **How to Fish** | Unity 6 (`6000.4.4f1`) | **Working** | SteamStub 3.1, DXVK rendering, mouse/keyboard, localization, `PlayerPrefs` persistence, and Steam lobby/FishySteamworks host startup. |
+| **Zompiercer** | Unity (Mono) | **Working** | Runs on Rine, though Proton currently outperforms Rine in FPS and frame smoothness. |
+| **Five Nights at Freddy's: Security Breach (FNAF 9)** | Unreal Engine 4 | **In Development (Partial)** | UE4 support is still in early development: main menu loads, but lobby background and some assets do not finish loading; reaches the first cutscene and stalls/crashes afterwards (not yet investigated in depth). |
 
 ### Building, Installing & Running
 
@@ -101,7 +110,7 @@ Licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See `LICENSE`.
 <a name="русский"></a>
 ## Русский
 
-> **Важно:** Rine находится на **активной экспериментальной стадии**. Это нативный внутрипроцессный слой совместимости Win64 для Linux x86_64, проверяемый на реальных играх на Godot, Unity (Mono) и Unity 6.
+> **Важно:** Rine находится на **активной экспериментальной стадии**. Это нативный внутрипроцессный слой совместимости Win64 для Linux x86_64, проверяемый на реальных играх на Godot, Unity (Mono) и Unity 6, а поддержка **Unreal Engine 4** сейчас находится в стадии разработки.
 
 ### О проекте
 
@@ -118,6 +127,7 @@ Licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See `LICENSE`.
 - **Гибридный Steamworks Bridge и сеть:** распаковка SteamStub 3.1, мост `steam_api64.dll` -> нативный Linux `steamclient.so`, `SteamAPI_ManualDispatch` (очереди `703` CallResult и сырых колбэков), локальные лобби `ISteamMatchmaking` и `ISteamNetworkingSockets` / `ISteamNetworkingUtils` для P2P и Relay.
 - **Локализация Win32 NLS, реестр и песочница:** таблицы локалей (`IsValidLocaleName`, `GetLocaleInfoEx`, `EnumSystemLocalesEx`, `LCIDToLocaleName`, `GetUserPreferredUILanguages`), JSON-реестр (`advapi32`) с поддержкой 8-байтных `REG_DWORD` `double` для `Unity PlayerPrefs.SetFloat`, виртуальная ФС `RineVfs` и изоляция Linux Landlock.
 - **Звук и ввод:** WASAPI через PipeWire/PulseAudio с низкой задержкой; полный цикл сообщений клавиатуры, мыши и Raw Input (`PeekMessageW`, `GetRawInputData`, `WH_MOUSE_LL`).
+- **Unreal Engine 4 и Media Foundation (в разработке):** начальная поддержка UE4 (`-dx11`), воспроизведения видео через Media Foundation (`mf.dll`/`mfplat.dll` на базе системного `ffmpeg`) и многоклиентного WASAPI; многие функции движка пока находятся в стадии разработки и не работают полностью.
 
 ### Результаты бенчмарков (NVIDIA GeForce RTX 3060, Linux)
 
@@ -140,8 +150,14 @@ Licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See `LICENSE`.
 | **Средняя RAM** | 2 723 МБ | **783 МБ** | **В 3.5 раза меньше RAM** |
 | **Пиковая RAM** | 3 310 МБ | **818 МБ** | **В 4 раза меньше в пике** |
 | **Процессы** | 22 – 24 процесса | **1 процесс** | Без фоновых демонов |
-| **Пик CPU** | 280.5% | **142.0%** | **В ~2 раза ниже пик** |
+| **Максимальная нагрузка CPU** | 280.5% | **142.0%** | **В ~2 раза ниже пик** |
 | **Потребление GPU** | 57.1 Вт | **48.3 Вт** | **Экономия ~9 Вт** |
+
+#### 3. *Zompiercer* (Unity Mono, качественное сравнение)
+
+| Метрика | Proton Experimental | Rine Win64 Native | Примечание |
+| :--- | :--- | :--- | :--- |
+| **FPS и плавность** | **Выше FPS и плавнее** | Ниже FPS / менее плавно | Точные значения FPS не сохранились; по тестам Proton пока опережает Rine как по среднему FPS, так и по плавности кадра. |
 
 ### Статус совместимости игр
 
@@ -150,6 +166,8 @@ Licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See `LICENSE`.
 | **That's Not My Neighbor** | Godot Engine | **Работает полностью** | Стабильный рендеринг, звук и ввод. |
 | **Cuphead** | Unity (Mono) | **Работает полностью** | Стабильные 60 FPS, звук WASAPI, сохранение управления. |
 | **How to Fish** | Unity 6 (`6000.4.4f1`) | **Работает** | SteamStub 3.1, DXVK, мышь/клавиатура, локализация, сохранение настроек `PlayerPrefs`, создание Steam-лобби и запуск хоста FishySteamworks. |
+| **Zompiercer** | Unity (Mono) | **Работает** | Запускается и работает на Rine, но по FPS и плавности пока уступает Proton. |
+| **Five Nights at Freddy's: Security Breach (FNAF 9)** | Unreal Engine 4 | **В разработке (частично)** | Поддержка UE4 на ранней стадии: меню работает, но фон лобби и некоторые части не догружаются; игра доходит до первой катсцены, но дальше не идёт (происходит затык, пока детально не разбиралось). |
 
 ### Сборка, установка и запуск
 

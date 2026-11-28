@@ -258,6 +258,39 @@ impl<'a> PeImage<'a> {
 
         export_list
     }
+
+    /// Returns all non-zero exports by (ordinal, rva), including ordinal-only exports.
+    pub fn exports_by_ordinal(&self) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        let export_dir_entry = &self.optional_header.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if export_dir_entry.virtual_address() == 0 || export_dir_entry.size() == 0 {
+            return out;
+        }
+        if let Some(exp_offset) = self.rva_to_offset(export_dir_entry.virtual_address()) {
+            if exp_offset + std::mem::size_of::<ImageExportDirectory>() > self.raw_data.len() {
+                return out;
+            }
+            let exp = unsafe {
+                &*(self.raw_data.as_ptr().add(exp_offset) as *const ImageExportDirectory)
+            };
+            let num_funcs = exp.number_of_functions as usize;
+            let base_ord = exp.base;
+            if let Some(funcs_off) = self.rva_to_offset(exp.address_of_functions) {
+                for ord_idx in 0..num_funcs {
+                    if funcs_off + (ord_idx + 1) * 4 > self.raw_data.len() {
+                        break;
+                    }
+                    let func_rva = unsafe {
+                        *(self.raw_data.as_ptr().add(funcs_off + ord_idx * 4) as *const u32)
+                    };
+                    if func_rva != 0 {
+                        out.push((base_ord + ord_idx as u32, func_rva));
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 #[repr(C)]
@@ -327,6 +360,22 @@ pub fn resolve_ordinal_name(dll_name: &str, ordinal: u16) -> &'static str {
             115 => "WSAStartup",
             116 => "WSACleanup",
             151 => "__WSAFDIsSet",
+            _ => "ordinal_stub",
+        }
+    } else if dll_upper.starts_with("XINPUT") {
+        match ordinal {
+            2 => "XInputGetState",
+            3 => "XInputSetState",
+            4 => "XInputGetCapabilities",
+            5 => "XInputEnable",
+            6 => "XInputGetBatteryInformation",
+            7 => "XInputGetKeystroke",
+            8 => "XInputGetAudioDeviceIds",
+            9 => "XInputGetDSoundAudioDeviceGuids",
+            100 => "XInputGetStateEx",
+            101 => "XInputWaitForGuideButton",
+            102 => "XInputCancelGuideButtonWait",
+            103 => "XInputPowerOffController",
             _ => "ordinal_stub",
         }
     } else if dll_upper.starts_with("OLEAUT32") {

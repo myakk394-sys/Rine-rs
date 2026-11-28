@@ -725,14 +725,14 @@ pub fn check_game_compatibility(exe_path: &Path) -> GameCompatibility {
     if has_ue_dir || has_ue_dlls {
         return GameCompatibility {
             engine: GameEngine::UnrealEngine { version: None },
-            engine_name: "Unreal Engine 4/5".into(),
+            engine_name: "Unreal Engine 4".into(),
             binary_format: inspection.format,
             architecture: inspection.arch,
-            status: CompatibilityStatus::UnsupportedEngine,
-            is_supported: false,
-            status_text: "Не поддерживается (Unreal Engine)".into(),
-            badge_color: (220, 50, 50),
-            details: "Движок Unreal Engine 4/5 требует специфичные вызовы ядра Windows и расширенную трансляцию DX12/Nanite. Поддержка Unreal Engine находится в активной разработке.".into(),
+            status: CompatibilityStatus::Supported,
+            is_supported: true,
+            status_text: "Поддерживается (Unreal Engine 4)".into(),
+            badge_color: (40, 180, 90),
+            details: "Движок Unreal Engine 4 поддерживается в режиме DirectX 11 (DXVK -> Vulkan, автоматически передаётся -dx11).".into(),
         };
     }
 

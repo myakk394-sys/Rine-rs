@@ -291,10 +291,18 @@ impl IatSymbolResolver {
                         Some(dlls::shell::CoInitializeEx as *const () as usize)
                     }
                     "CoUninitialize" => Some(dlls::shell::CoUninitialize as *const () as usize),
+                    "OleInitialize" => Some(dlls::shell::OleInitialize as *const () as usize),
+                    "OleUninitialize" => Some(dlls::shell::OleUninitialize as *const () as usize),
                     "CoCreateInstance" => Some(dlls::shell::CoCreateInstance as *const () as usize),
                     "CoCreateGuid" => Some(dlls::shell::CoCreateGuid as *const () as usize),
                     "StringFromGUID2" => Some(dlls::shell::StringFromGUID2 as *const () as usize),
                     "StringFromIID" => Some(dlls::shell::StringFromIID as *const () as usize),
+                    "IIDFromString" => Some(dlls::shell::IIDFromString as *const () as usize),
+                    "CLSIDFromString" => Some(dlls::shell::CLSIDFromString as *const () as usize),
+                    "PropVariantCopy" => Some(dlls::shell::PropVariantCopy as *const () as usize),
+                    "RegisterDragDrop" => Some(dlls::shell::RegisterDragDrop as *const () as usize),
+                    "RevokeDragDrop" => Some(dlls::shell::RevokeDragDrop as *const () as usize),
+                    "ReleaseStgMedium" => Some(dlls::shell::ReleaseStgMedium as *const () as usize),
                     "CoTaskMemAlloc" => Some(dlls::shell::CoTaskMemAlloc as *const () as usize),
                     "CoTaskMemFree" => Some(dlls::shell::CoTaskMemFree as *const () as usize),
                     "CoTaskMemRealloc" => Some(dlls::shell::CoTaskMemRealloc as *const () as usize),
@@ -325,6 +333,7 @@ impl IatSymbolResolver {
                     "CoTaskMemFree" => Some(dlls::shell::CoTaskMemFree as *const () as usize),
                     "PropVariantClear" => Some(dlls::shell::PropVariantClear as *const () as usize),
                     "VariantInit" => Some(dlls::shell::VariantInit as *const () as usize),
+                    "VariantClear" => Some(dlls::shell::VariantClear as *const () as usize),
                     "RoSetErrorReportingFlags" => {
                         Some(dlls::shell::RoSetErrorReportingFlags as *const () as usize)
                     }
@@ -392,12 +401,45 @@ impl IatSymbolResolver {
             }
             dll if dll.starts_with("DBGHELP") => match func_name {
                 "SymInitialize" => Some(dlls::shell::SymInitialize as *const () as usize),
+                "SymInitializeW" => Some(dlls::shell::SymInitializeW as *const () as usize),
                 "SymFromAddr" => Some(dlls::shell::SymFromAddr as *const () as usize),
+                "SymFromAddrW" => Some(dlls::shell::SymFromAddrW as *const () as usize),
                 "SymCleanup" => Some(dlls::shell::SymCleanup as *const () as usize),
+                "SymSetOptions" => Some(dlls::shell::SymSetOptions as *const () as usize),
+                "SymGetOptions" => Some(dlls::shell::SymGetOptions as *const () as usize),
+                "SymGetLineFromAddr64" => Some(dlls::shell::SymGetLineFromAddr64 as *const () as usize),
+                "SymGetLineFromAddrW64" => Some(dlls::shell::SymGetLineFromAddrW64 as *const () as usize),
+                "SymGetModuleInfo64" => Some(dlls::shell::SymGetModuleInfo64 as *const () as usize),
+                "SymGetModuleInfoW64" => Some(dlls::shell::SymGetModuleInfoW64 as *const () as usize),
+                "SymLoadModuleEx" => Some(dlls::shell::SymLoadModuleEx as *const () as usize),
+                "SymLoadModuleExW" => Some(dlls::shell::SymLoadModuleExW as *const () as usize),
+                "StackWalk64" => Some(dlls::shell::StackWalk64 as *const () as usize),
+                "SymFunctionTableAccess64" => Some(dlls::shell::SymFunctionTableAccess64 as *const () as usize),
+                "SymGetModuleBase64" => Some(dlls::shell::SymGetModuleBase64 as *const () as usize),
+                "SymGetSearchPathW" => Some(dlls::shell::SymGetSearchPathW as *const () as usize),
+                "SymSetSearchPathW" => Some(dlls::shell::SymSetSearchPathW as *const () as usize),
+                "MiniDumpWriteDump" => Some(dlls::shell::MiniDumpWriteDump as *const () as usize),
                 _ => None,
             },
             dll if dll.starts_with("WS2_32") || dll.starts_with("WSOCK32") => match func_name {
                 "WSAStartup" => Some(dlls::ws2_32::WSAStartup as *const () as usize),
+                "GetHostNameW" => Some(dlls::ws2_32::GetHostNameW as *const () as usize),
+                "WSALookupServiceBeginW" => {
+                    Some(dlls::ws2_32::WSALookupServiceBeginW as *const () as usize)
+                }
+                "WSALookupServiceBeginA" => {
+                    Some(dlls::ws2_32::WSALookupServiceBeginA as *const () as usize)
+                }
+                "WSALookupServiceNextW" => {
+                    Some(dlls::ws2_32::WSALookupServiceNextW as *const () as usize)
+                }
+                "WSALookupServiceNextA" => {
+                    Some(dlls::ws2_32::WSALookupServiceNextA as *const () as usize)
+                }
+                "WSALookupServiceEnd" => {
+                    Some(dlls::ws2_32::WSALookupServiceEnd as *const () as usize)
+                }
+                "WSANSPIoctl" => Some(dlls::ws2_32::WSANSPIoctl as *const () as usize),
                 "WSACleanup" => Some(dlls::ws2_32::WSACleanup as *const () as usize),
                 "WSAGetLastError" => Some(dlls::ws2_32::WSAGetLastError as *const () as usize),
                 "WSASetLastError" => Some(dlls::ws2_32::WSASetLastError as *const () as usize),
@@ -502,6 +544,20 @@ impl IatSymbolResolver {
                 }
                 "RegGetValueW" => Some(dlls::advapi32::RegGetValueW as *const () as usize),
                 "RegGetValueA" => Some(dlls::advapi32::RegGetValueA as *const () as usize),
+                "RegEnumKeyExW" => Some(dlls::advapi32::RegEnumKeyExW as *const () as usize),
+                "RegEnumValueW" => Some(dlls::advapi32::RegEnumValueW as *const () as usize),
+                "GetUserNameW" => Some(dlls::advapi32::GetUserNameW as *const () as usize),
+                "GetUserNameA" => Some(dlls::advapi32::GetUserNameA as *const () as usize),
+                "LookupPrivilegeValueA" => {
+                    Some(dlls::advapi32::LookupPrivilegeValueA as *const () as usize)
+                }
+                "RegisterEventSourceW" => {
+                    Some(dlls::advapi32::RegisterEventSourceW as *const () as usize)
+                }
+                "ReportEventW" => Some(dlls::advapi32::ReportEventW as *const () as usize),
+                "DeregisterEventSource" => {
+                    Some(dlls::advapi32::DeregisterEventSource as *const () as usize)
+                }
                 "AdjustTokenPrivileges" => {
                     Some(dlls::advapi32::AdjustTokenPrivileges as *const () as usize)
                 }
@@ -509,6 +565,8 @@ impl IatSymbolResolver {
                     Some(dlls::advapi32::GetTokenInformation as *const () as usize)
                 }
                 "OpenProcessToken" => Some(dlls::advapi32::OpenProcessToken as *const () as usize),
+                "GetSecurityInfo" => Some(dlls::advapi32::GetSecurityInfo as *const () as usize),
+                "SetSecurityInfo" => Some(dlls::advapi32::SetSecurityInfo as *const () as usize),
                 "GetSidSubAuthority" => {
                     Some(dlls::advapi32::GetSidSubAuthority as *const () as usize)
                 }
@@ -630,6 +688,54 @@ impl IatSymbolResolver {
                     "RegEnumValueA" => Some(dlls::advapi32::RegEnumValueA as *const () as usize),
                     "IsDBCSLeadByteEx" => Some(dlls::kernel32::IsDBCSLeadByteEx as *const () as usize),
                     "IsWow64Process" => Some(dlls::kernel32::IsWow64Process as *const () as usize),
+                    "IsWow64Process2" => {
+                        Some(dlls::kernel32::IsWow64Process2 as *const () as usize)
+                    }
+                    "SetThreadInformation" => {
+                        Some(dlls::kernel32::SetThreadInformation as *const () as usize)
+                    }
+                    "SetProcessInformation" => {
+                        Some(dlls::kernel32::SetProcessInformation as *const () as usize)
+                    }
+                    "DiscardVirtualMemory" => {
+                        Some(dlls::kernel32::DiscardVirtualMemory as *const () as usize)
+                    }
+                    "PrefetchVirtualMemory" => {
+                        Some(dlls::kernel32::PrefetchVirtualMemory as *const () as usize)
+                    }
+                    "GetConsoleTitleW" => {
+                        Some(dlls::kernel32::GetConsoleTitleW as *const () as usize)
+                    }
+                    "GetConsoleTitleA" => {
+                        Some(dlls::kernel32::GetConsoleTitleA as *const () as usize)
+                    }
+                    "SetConsoleTitleW" => {
+                        Some(dlls::kernel32::SetConsoleTitleW as *const () as usize)
+                    }
+                    "SetConsoleTitleA" => {
+                        Some(dlls::kernel32::SetConsoleTitleA as *const () as usize)
+                    }
+                    "GetPackageFamilyName" => {
+                        Some(dlls::kernel32::GetPackageFamilyName as *const () as usize)
+                    }
+                    "RegisterWaitForSingleObject" => {
+                        Some(dlls::kernel32::RegisterWaitForSingleObject as *const () as usize)
+                    }
+                    "UnregisterWait" => {
+                        Some(dlls::kernel32::UnregisterWait as *const () as usize)
+                    }
+                    "UnregisterWaitEx" => {
+                        Some(dlls::kernel32::UnregisterWaitEx as *const () as usize)
+                    }
+                    "GetCurrentPackageFamilyName" => {
+                        Some(dlls::kernel32::GetCurrentPackageFamilyName as *const () as usize)
+                    }
+                    "GetPackageFullName" => {
+                        Some(dlls::kernel32::GetPackageFullName as *const () as usize)
+                    }
+                    "GetCurrentPackageFullName" => {
+                        Some(dlls::kernel32::GetCurrentPackageFullName as *const () as usize)
+                    }
                     "GetProcessIdOfThread" => Some(dlls::kernel32::GetProcessIdOfThread as *const () as usize),
                     "GetSystemWindowsDirectoryW" => Some(dlls::kernel32::GetSystemWindowsDirectoryW as *const () as usize),
                     "Module32First" => Some(dlls::kernel32::Module32First as *const () as usize),
@@ -637,9 +743,13 @@ impl IatSymbolResolver {
                     "ConnectNamedPipe" => Some(dlls::kernel32::ConnectNamedPipe as *const () as usize),
                     "DisconnectNamedPipe" => Some(dlls::kernel32::DisconnectNamedPipe as *const () as usize),
                     "CreateNamedPipeA" => Some(dlls::kernel32::CreateNamedPipeA as *const () as usize),
+                    "CreateNamedPipeW" => Some(dlls::kernel32::CreateNamedPipeW as *const () as usize),
+                    "WaitNamedPipeW" => Some(dlls::kernel32::WaitNamedPipeW as *const () as usize),
+                    "SetNamedPipeHandleState" => Some(dlls::kernel32::SetNamedPipeHandleState as *const () as usize),
                     "WriteProcessMemory" => Some(dlls::kernel32::WriteProcessMemory as *const () as usize),
                     "VirtualAllocEx" => Some(dlls::kernel32::VirtualAllocEx as *const () as usize),
                     "lstrcmpA" => Some(dlls::kernel32::lstrcmpA as *const () as usize),
+                    "lstrcmpW" => Some(dlls::kernel32::lstrcmpW as *const () as usize),
                     "lstrcpyW" => Some(dlls::kernel32::lstrcpyW as *const () as usize),
                     "K32GetPerformanceInfo" => Some(dlls::kernel32::K32GetPerformanceInfo as *const () as usize),
                     "LCIDToLocaleName" => Some(dlls::kernel32::LCIDToLocaleName as *const () as usize),
@@ -913,6 +1023,27 @@ impl IatSymbolResolver {
                     "SetConsoleCtrlHandler" => {
                         Some(dlls::kernel32::SetConsoleCtrlHandler as *const () as usize)
                     }
+                    "QueueUserWorkItem" => {
+                        Some(dlls::kernel32::QueueUserWorkItem as *const () as usize)
+                    }
+                    "GetProductInfo" => {
+                        Some(dlls::kernel32::GetProductInfo as *const () as usize)
+                    }
+                    "GetComputerNameExW" => {
+                        Some(dlls::kernel32::GetComputerNameExW as *const () as usize)
+                    }
+                    "CreateIoCompletionPort" => {
+                        Some(dlls::kernel32::CreateIoCompletionPort as *const () as usize)
+                    }
+                    "PostQueuedCompletionStatus" => {
+                        Some(dlls::kernel32::PostQueuedCompletionStatus as *const () as usize)
+                    }
+                    "GetQueuedCompletionStatus" => {
+                        Some(dlls::kernel32::GetQueuedCompletionStatus as *const () as usize)
+                    }
+                    "GetQueuedCompletionStatusEx" => {
+                        Some(dlls::kernel32::GetQueuedCompletionStatusEx as *const () as usize)
+                    }
                     "VerSetConditionMask" => {
                         Some(dlls::kernel32::VerSetConditionMask as *const () as usize)
                     }
@@ -1039,6 +1170,9 @@ impl IatSymbolResolver {
                     ),
                     "InitializeCriticalSectionEx" => {
                         Some(dlls::kernel32::InitializeCriticalSectionEx as *const () as usize)
+                    }
+                    "SetCriticalSectionSpinCount" => {
+                        Some(dlls::kernel32::SetCriticalSectionSpinCount as *const () as usize)
                     }
                     "InitializeSListHead" => {
                         Some(dlls::kernel32::InitializeSListHead as *const () as usize)
@@ -1361,6 +1495,18 @@ impl IatSymbolResolver {
                     "HeapSetInformation" => {
                         Some(dlls::kernel32::HeapSetInformation as *const () as usize)
                     }
+                    "SetConsoleScreenBufferSize" => {
+                        Some(dlls::kernel32::SetConsoleScreenBufferSize as *const () as usize)
+                    }
+                    "SetConsoleWindowInfo" => {
+                        Some(dlls::kernel32::SetConsoleWindowInfo as *const () as usize)
+                    }
+                    "ReadConsoleA" => {
+                        Some(dlls::kernel32::ReadConsoleA as *const () as usize)
+                    }
+                    "CompareStringOrdinal" => {
+                        Some(dlls::kernel32::CompareStringOrdinal as *const () as usize)
+                    }
                     "SetHandleCount" => {
                         Some(dlls::kernel32::SetHandleCount as *const () as usize)
                     }
@@ -1369,6 +1515,25 @@ impl IatSymbolResolver {
                     }
                     "ExpandEnvironmentStringsW" => {
                         Some(dlls::kernel32::ExpandEnvironmentStringsW as *const () as usize)
+                    }
+                    "ExpandEnvironmentStringsA" => {
+                        Some(dlls::kernel32::ExpandEnvironmentStringsA as *const () as usize)
+                    }
+                    "CompareFileTime" => {
+                        Some(dlls::kernel32::CompareFileTime as *const () as usize)
+                    }
+                    "VirtualUnlock" => {
+                        Some(dlls::kernel32::VirtualUnlock as *const () as usize)
+                    }
+                    "GetProcessHandleCount" => {
+                        Some(dlls::kernel32::GetProcessHandleCount as *const () as usize)
+                    }
+                    "AllocConsole" => Some(dlls::kernel32::AllocConsole as *const () as usize),
+                    "GetConsoleWindow" => {
+                        Some(dlls::kernel32::GetConsoleWindow as *const () as usize)
+                    }
+                    "GetFinalPathNameByHandleW" => {
+                        Some(dlls::kernel32::GetFinalPathNameByHandleW as *const () as usize)
                     }
                     "K32GetProcessMemoryInfo" => {
                         Some(dlls::kernel32::K32GetProcessMemoryInfo as *const () as usize)
@@ -1535,6 +1700,7 @@ impl IatSymbolResolver {
                     "GetNumberOfConsoleInputEvents" => Some(dlls::kernel32::GetNumberOfConsoleInputEvents as *const () as usize),
                     "GetOverlappedResult" => Some(dlls::kernel32::GetOverlappedResult as *const () as usize),
                     "GetProcessTimes" => Some(dlls::kernel32::GetProcessTimes as *const () as usize),
+                    "GetThreadTimes" => Some(dlls::kernel32::GetThreadTimes as *const () as usize),
                     "GetProcessWorkingSetSize" => Some(dlls::kernel32::GetProcessWorkingSetSize as *const () as usize),
                     "GetSystemTimePreciseAsFileTime" => Some(dlls::kernel32::GetSystemTimePreciseAsFileTime as *const () as usize),
                     "GetSystemTimes" => Some(dlls::kernel32::GetSystemTimes as *const () as usize),
@@ -1570,6 +1736,23 @@ impl IatSymbolResolver {
                 }
             }
             "USER32.DLL" | "USER32" | "user32.dll" | "WIN32U.DLL" => match func_name {
+                "LoadCursorFromFileW" => Some(dlls::user32::LoadCursorFromFileW as *const () as usize),
+                "LoadCursorFromFileA" => Some(dlls::user32::LoadCursorFromFileA as *const () as usize),
+                "DisableProcessWindowsGhosting" => Some(dlls::user32::DisableProcessWindowsGhosting as *const () as usize),
+                "GetProcessWindowStation" => Some(dlls::user32::GetProcessWindowStation as *const () as usize),
+                "GetUserObjectInformationW" => Some(dlls::user32::GetUserObjectInformationW as *const () as usize),
+                "GetWindowInfo" => Some(dlls::user32::GetWindowInfo as *const () as usize),
+                "GetTopWindow" => Some(dlls::user32::GetTopWindow as *const () as usize),
+                "BeginPaint" => Some(dlls::user32::BeginPaint as *const () as usize),
+                "EndPaint" => Some(dlls::user32::EndPaint as *const () as usize),
+                "GetSystemMenu" => Some(dlls::user32::GetSystemMenu as *const () as usize),
+                "EnableMenuItem" => Some(dlls::user32::EnableMenuItem as *const () as usize),
+                "RegisterHotKey" => Some(dlls::user32::RegisterHotKey as *const () as usize),
+                "UnregisterHotKey" => Some(dlls::user32::UnregisterHotKey as *const () as usize),
+                "SetLayeredWindowAttributes" => Some(dlls::user32::SetLayeredWindowAttributes as *const () as usize),
+                "GetWindowDisplayAffinity" => Some(dlls::user32::GetWindowDisplayAffinity as *const () as usize),
+                "SetWindowDisplayAffinity" => Some(dlls::user32::SetWindowDisplayAffinity as *const () as usize),
+                "DrawStateW" => Some(dlls::user32::DrawStateW as *const () as usize),
                 "keybd_event" => Some(dlls::user32::keybd_event as *const () as usize),
                 "SendMessageTimeoutW" => Some(dlls::user32::SendMessageTimeoutW as *const () as usize),
                 "MapVirtualKeyExW" => Some(dlls::user32::MapVirtualKeyExW as *const () as usize),
@@ -1589,6 +1772,14 @@ impl IatSymbolResolver {
                 "ActivateKeyboardLayout" => Some(dlls::user32::ActivateKeyboardLayout as *const () as usize),
                 "WindowFromDC" => Some(dlls::user32::WindowFromDC as *const () as usize),
                 "VkKeyScanExW" => Some(dlls::user32::VkKeyScanExW as *const () as usize),
+                "CharUpperW" => Some(dlls::user32::CharUpperW as *const () as usize),
+                "CharLowerW" => Some(dlls::user32::CharLowerW as *const () as usize),
+                "CharUpperA" => Some(dlls::user32::CharUpperA as *const () as usize),
+                "CharLowerA" => Some(dlls::user32::CharLowerA as *const () as usize),
+                "CharUpperBuffW" => Some(dlls::user32::CharUpperBuffW as *const () as usize),
+                "CharLowerBuffW" => Some(dlls::user32::CharLowerBuffW as *const () as usize),
+                "CharUpperBuffA" => Some(dlls::user32::CharUpperBuffA as *const () as usize),
+                "CharLowerBuffA" => Some(dlls::user32::CharLowerBuffA as *const () as usize),
                 "RegisterClassExW" => Some(dlls::user32::RegisterClassExW as *const () as usize),
                 "RegisterClassExA" => Some(dlls::user32::RegisterClassExA as *const () as usize),
                 "RegisterClassW" => Some(dlls::user32::RegisterClassW as *const () as usize),
@@ -1602,6 +1793,8 @@ impl IatSymbolResolver {
                 "GetMessageW" | "GetMessageA" => {
                     Some(dlls::user32::GetMessageW as *const () as usize)
                 }
+                "GetMessagePos" => Some(dlls::user32::GetMessagePos as *const () as usize),
+                "GetMessageTime" => Some(dlls::user32::GetMessageTime as *const () as usize),
                 "PeekMessageW" | "PeekMessageA" => {
                     Some(dlls::user32::PeekMessageW as *const () as usize)
                 }
@@ -1634,6 +1827,20 @@ impl IatSymbolResolver {
                 "SetWindowTextA" => Some(dlls::user32::SetWindowTextA as *const () as usize),
                 "TranslateMessage" => Some(dlls::user32::TranslateMessage as *const () as usize),
                 "GetSystemMetrics" => Some(dlls::user32::GetSystemMetrics as *const () as usize),
+                "SetWinEventHook" => Some(dlls::user32::SetWinEventHook as *const () as usize),
+                "UnhookWinEvent" => Some(dlls::user32::UnhookWinEvent as *const () as usize),
+                "RegisterSuspendResumeNotification" => {
+                    Some(dlls::user32::RegisterSuspendResumeNotification as *const () as usize)
+                }
+                "UnregisterSuspendResumeNotification" => {
+                    Some(dlls::user32::UnregisterSuspendResumeNotification as *const () as usize)
+                }
+                "RegisterPowerSettingNotification" => {
+                    Some(dlls::user32::RegisterPowerSettingNotification as *const () as usize)
+                }
+                "UnregisterPowerSettingNotification" => {
+                    Some(dlls::user32::UnregisterPowerSettingNotification as *const () as usize)
+                }
                 "LoadIconA" => Some(dlls::user32::LoadIconA as *const () as usize),
                 "LoadIconW" => Some(dlls::user32::LoadIconW as *const () as usize),
                 "LoadCursorA" => Some(dlls::user32::LoadCursorA as *const () as usize),
@@ -1945,6 +2152,15 @@ impl IatSymbolResolver {
                 _ => None,
             },
             "GDI32.DLL" | "OPENGL32.DLL" => match func_name {
+                "CreateRectRgn" => Some(dlls::gdi32::CreateRectRgn as *const () as usize),
+                "CreateRoundRectRgn" => Some(dlls::gdi32::CreateRoundRectRgn as *const () as usize),
+                "PtInRegion" => Some(dlls::gdi32::PtInRegion as *const () as usize),
+                "GetTextExtentPoint32W" => Some(dlls::gdi32::GetTextExtentPoint32W as *const () as usize),
+                "SetBkColor" => Some(dlls::gdi32::SetBkColor as *const () as usize),
+                "SetBkMode" => Some(dlls::gdi32::SetBkMode as *const () as usize),
+                "SetTextAlign" => Some(dlls::gdi32::SetTextAlign as *const () as usize),
+                "SetTextColor" => Some(dlls::gdi32::SetTextColor as *const () as usize),
+                "TextOutW" => Some(dlls::gdi32::TextOutW as *const () as usize),
                 "GetDC" => Some(dlls::gdi32::GetDC as *const () as usize),
                 "ReleaseDC" => Some(dlls::gdi32::ReleaseDC as *const () as usize),
                 "GetBitmapBits" => Some(dlls::gdi32::GetBitmapBits as *const () as usize),
@@ -1957,6 +2173,15 @@ impl IatSymbolResolver {
                 "CreateBitmap" => Some(dlls::gdi32::CreateBitmap as *const () as usize),
                 "SelectObject" => Some(dlls::gdi32::SelectObject as *const () as usize),
                 "DeleteObject" => Some(dlls::gdi32::DeleteObject as *const () as usize),
+                "GetStockObject" => Some(dlls::gdi32::GetStockObject as *const () as usize),
+                "CreateSolidBrush" => Some(dlls::gdi32::CreateSolidBrush as *const () as usize),
+                "CreateFontIndirectW" => {
+                    Some(dlls::gdi32::CreateFontIndirectW as *const () as usize)
+                }
+                "GetObjectW" => Some(dlls::gdi32::GetObjectW as *const () as usize),
+                "CreateDCW" => Some(dlls::gdi32::CreateDCW as *const () as usize),
+                "CreateDCA" => Some(dlls::gdi32::CreateDCA as *const () as usize),
+                "CreateICW" => Some(dlls::gdi32::CreateICW as *const () as usize),
                 "CreateDIBSection" => Some(dlls::gdi32::CreateDIBSection as *const () as usize),
                 "SwapBuffers" => Some(dlls::gdi32::SwapBuffers as *const () as usize),
                 "BitBlt" => Some(dlls::gdi32::BitBlt as *const () as usize),
@@ -2114,6 +2339,12 @@ impl IatSymbolResolver {
                 "CryptBinaryToStringW" => {
                     Some(dlls::crypt32::CryptBinaryToStringW as *const () as usize)
                 }
+                "CryptProtectData" => {
+                    Some(dlls::crypt32::CryptProtectData as *const () as usize)
+                }
+                "CryptUnprotectData" => {
+                    Some(dlls::crypt32::CryptUnprotectData as *const () as usize)
+                }
                 _ => None,
             },
             dll if dll.starts_with("CFGMGR32") => crate::dlls::cfgmgr32::resolve_cfgmgr32_symbol(func_name),
@@ -2140,6 +2371,23 @@ impl IatSymbolResolver {
             },
             "WS2_32.DLL" | "WSOCK32.DLL" | "WS2_32" | "WSOCK32" => match func_name {
                 "WSAStartup" => Some(dlls::ws2_32::WSAStartup as *const () as usize),
+                "GetHostNameW" => Some(dlls::ws2_32::GetHostNameW as *const () as usize),
+                "WSALookupServiceBeginW" => {
+                    Some(dlls::ws2_32::WSALookupServiceBeginW as *const () as usize)
+                }
+                "WSALookupServiceBeginA" => {
+                    Some(dlls::ws2_32::WSALookupServiceBeginA as *const () as usize)
+                }
+                "WSALookupServiceNextW" => {
+                    Some(dlls::ws2_32::WSALookupServiceNextW as *const () as usize)
+                }
+                "WSALookupServiceNextA" => {
+                    Some(dlls::ws2_32::WSALookupServiceNextA as *const () as usize)
+                }
+                "WSALookupServiceEnd" => {
+                    Some(dlls::ws2_32::WSALookupServiceEnd as *const () as usize)
+                }
+                "WSANSPIoctl" => Some(dlls::ws2_32::WSANSPIoctl as *const () as usize),
                 "WSACleanup" => Some(dlls::ws2_32::WSACleanup as *const () as usize),
                 "WSAGetLastError" => Some(dlls::ws2_32::WSAGetLastError as *const () as usize),
                 "WSASetLastError" => Some(dlls::ws2_32::WSASetLastError as *const () as usize),
@@ -2350,7 +2598,20 @@ impl IatSymbolResolver {
                     Some(dlls::ntdll::RtlWakeAddressAll as *const () as usize)
                 }
                 "RtlGetVersion" => Some(dlls::ntdll::RtlGetVersion as *const () as usize),
+                "RtlDllShutdownInProgress" => Some(dlls::ntdll::RtlDllShutdownInProgress as *const () as usize),
                 "RtlVerifyVersionInfo" => Some(dlls::ntdll::RtlVerifyVersionInfo as *const () as usize),
+                "RtlCaptureStackBackTrace" => {
+                    Some(dlls::kernel32::RtlCaptureStackBackTrace as *const () as usize)
+                }
+                "NtDeviceIoControlFile" | "ZwDeviceIoControlFile" => {
+                    Some(dlls::ntdll::NtDeviceIoControlFile as *const () as usize)
+                }
+                "NtQueryVolumeInformationFile" | "ZwQueryVolumeInformationFile" => {
+                    Some(dlls::ntdll::NtQueryVolumeInformationFile as *const () as usize)
+                }
+                "NtQuerySystemInformation" | "ZwQuerySystemInformation" => {
+                    Some(dlls::ntdll::NtQuerySystemInformation as *const () as usize)
+                }
                 "NtQueryDirectoryFile" | "ZwQueryDirectoryFile" => {
                     Some(dlls::ntdll::NtQueryDirectoryFile as *const () as usize)
                 }
@@ -2369,12 +2630,69 @@ impl IatSymbolResolver {
                 "__wine_dbg_output" => Some(dlls::ntdll::__wine_dbg_output as *const () as usize),
                 _ => None,
             },
+            dll if dll.starts_with("COMCTL32") => match func_name {
+                "InitCommonControls" => {
+                    Some(dlls::user32::InitCommonControls as *const () as usize)
+                }
+                "InitCommonControlsEx" => {
+                    Some(dlls::user32::InitCommonControlsEx as *const () as usize)
+                }
+                "SetWindowSubclass" => {
+                    Some(dlls::user32::SetWindowSubclass as *const () as usize)
+                }
+                "RemoveWindowSubclass" => {
+                    Some(dlls::user32::RemoveWindowSubclass as *const () as usize)
+                }
+                "DefSubclassProc" => Some(dlls::user32::DefSubclassProc as *const () as usize),
+                "TaskDialog" => Some(dlls::user32::TaskDialog as *const () as usize),
+                "TaskDialogIndirect" => {
+                    Some(dlls::user32::TaskDialogIndirect as *const () as usize)
+                }
+                _ => None,
+            },
             dll if dll.starts_with("SHCORE") || dll.starts_with("API-MS-WIN-SHCORE-") => match func_name {
                 "SetProcessDpiAwareness" => {
                     Some(dlls::user32::SetProcessDpiAwareness as *const () as usize)
                 }
                 "GetDpiForMonitor" => Some(dlls::user32::GetDpiForMonitor as *const () as usize),
                 "GetProcessDpiAwareness" => Some(dlls::user32::GetProcessDpiAwareness as *const () as usize),
+                _ => None,
+            },
+            "MSVCP140.DLL" | "MSVCP140_1.DLL" | "MSVCP140_2.DLL" => match func_name {
+                "_Mtx_init_in_situ" => Some(dlls::crt::_Mtx_init_in_situ as *const () as usize),
+                "_Mtx_init" => Some(dlls::crt::_Mtx_init as *const () as usize),
+                "_Mtx_destroy_in_situ" => {
+                    Some(dlls::crt::_Mtx_destroy_in_situ as *const () as usize)
+                }
+                "_Mtx_destroy" => Some(dlls::crt::_Mtx_destroy as *const () as usize),
+                "_Mtx_lock" => Some(dlls::crt::_Mtx_lock as *const () as usize),
+                "_Mtx_trylock" => Some(dlls::crt::_Mtx_trylock as *const () as usize),
+                "_Mtx_unlock" => Some(dlls::crt::_Mtx_unlock as *const () as usize),
+                "_Mtx_current_owns" => Some(dlls::crt::_Mtx_current_owns as *const () as usize),
+                "_Mtx_clear_owner" => Some(dlls::crt::_Mtx_clear_owner as *const () as usize),
+                "_Mtx_reset_owner" => Some(dlls::crt::_Mtx_reset_owner as *const () as usize),
+                "_Cnd_init_in_situ" => Some(dlls::crt::_Cnd_init_in_situ as *const () as usize),
+                "_Cnd_init" => Some(dlls::crt::_Cnd_init as *const () as usize),
+                "_Cnd_destroy_in_situ" => {
+                    Some(dlls::crt::_Cnd_destroy_in_situ as *const () as usize)
+                }
+                "_Cnd_destroy" => Some(dlls::crt::_Cnd_destroy as *const () as usize),
+                "_Cnd_wait" => Some(dlls::crt::_Cnd_wait as *const () as usize),
+                "_Cnd_signal" => Some(dlls::crt::_Cnd_signal as *const () as usize),
+                "_Cnd_broadcast" => Some(dlls::crt::_Cnd_broadcast as *const () as usize),
+                "_Cnd_do_broadcast_at_thread_exit" => {
+                    Some(dlls::crt::_Cnd_do_broadcast_at_thread_exit as *const () as usize)
+                }
+                "_Thrd_id" => Some(dlls::crt::_Thrd_id as *const () as usize),
+                "_Thrd_yield" => Some(dlls::crt::_Thrd_yield as *const () as usize),
+                "_Thrd_start" => Some(dlls::crt::_Thrd_start as *const () as usize),
+                "_Thrd_join" => Some(dlls::crt::_Thrd_join as *const () as usize),
+                "??0_Lockit@std@@QEAA@H@Z" => {
+                    Some(dlls::crt::msvcp_lockit_ctor as *const () as usize)
+                }
+                "??1_Lockit@std@@QEAA@XZ" => {
+                    Some(dlls::crt::msvcp_lockit_dtor as *const () as usize)
+                }
                 _ => None,
             },
             // Universal CRT: Map ALL api-ms-win-crt-* DLL names to our CRT implementations.
@@ -2666,15 +2984,90 @@ impl IatSymbolResolver {
                 "__stdio_common_vsprintf" => {
                     Some(dlls::crt::__stdio_common_vsprintf as *const () as usize)
                 }
-                "__stdio_common_vswprintf" | "__stdio_common_vswprintf_s" => {
-                    Some(dlls::crt::msvcrt_sprintf_stub as *const () as usize)
+                "__stdio_common_vswprintf"
+                | "__stdio_common_vswprintf_s"
+                | "__stdio_common_vsnwprintf_s" => {
+                    Some(dlls::crt::__stdio_common_vswprintf as *const () as usize)
                 }
+                "_vsnwprintf_s" | "_vsnwprintf_s_l" => {
+                    Some(dlls::crt::_vsnwprintf_s as *const () as usize)
+                }
+                "_vsnwprintf" | "_vsnwprintf_l" => {
+                    Some(dlls::crt::_vsnwprintf as *const () as usize)
+                }
+                "vswprintf_s" => Some(dlls::crt::vswprintf_s as *const () as usize),
                 "EncodePointer" | "_encode_pointer" => {
                     Some(dlls::kernel32::EncodePointer as *const () as usize)
                 }
                 "DecodePointer" | "_decode_pointer" => {
                     Some(dlls::kernel32::DecodePointer as *const () as usize)
                 }
+                "iswalpha" => Some(dlls::crt::crt_iswalpha as *const () as usize),
+                "iswalnum" => Some(dlls::crt::crt_iswalnum as *const () as usize),
+                "iswdigit" => Some(dlls::crt::crt_iswdigit as *const () as usize),
+                "iswlower" => Some(dlls::crt::crt_iswlower as *const () as usize),
+                "iswupper" => Some(dlls::crt::crt_iswupper as *const () as usize),
+                "iswspace" => Some(dlls::crt::crt_iswspace as *const () as usize),
+                "iswxdigit" => Some(dlls::crt::crt_iswxdigit as *const () as usize),
+                "iswprint" => Some(dlls::crt::crt_iswprint as *const () as usize),
+                "iswgraph" => Some(dlls::crt::crt_iswgraph as *const () as usize),
+                "iswctype" => Some(dlls::crt::crt_iswctype as *const () as usize),
+                "isalnum" => Some(dlls::crt::crt_isalnum as *const () as usize),
+                "islower" => Some(dlls::crt::crt_islower as *const () as usize),
+                "isupper" => Some(dlls::crt::crt_isupper as *const () as usize),
+                "isxdigit" => Some(dlls::crt::crt_isxdigit as *const () as usize),
+                "isprint" => Some(dlls::crt::crt_isprint as *const () as usize),
+                "isgraph" => Some(dlls::crt::crt_isgraph as *const () as usize),
+                "_wcsnicmp" => Some(dlls::crt::crt_wcsnicmp as *const () as usize),
+                "wcsstr" => Some(dlls::crt::crt_wcsstr as *const () as usize),
+                "wcstod" => Some(dlls::crt::crt_wcstod as *const () as usize),
+                "_wcstoi64" => Some(dlls::crt::crt_wcstoi64 as *const () as usize),
+                "_wcstoui64" => Some(dlls::crt::crt_wcstoui64 as *const () as usize),
+                "wcstoul" => Some(dlls::crt::crt_wcstoul as *const () as usize),
+                "_wtof" => Some(dlls::crt::crt_wtof as *const () as usize),
+                "_wtoi" => Some(dlls::crt::crt_wtoi as *const () as usize),
+                "_wtoi64" => Some(dlls::crt::crt_wtoi64 as *const () as usize),
+                "strnlen" => Some(dlls::crt::crt_strnlen as *const () as usize),
+                "acos" => Some(dlls::crt::crt_acos as *const () as usize),
+                "acosf" => Some(dlls::crt::crt_acosf as *const () as usize),
+                "asin" => Some(dlls::crt::crt_asin as *const () as usize),
+                "asinf" => Some(dlls::crt::crt_asinf as *const () as usize),
+                "atan" => Some(dlls::crt::crt_atan as *const () as usize),
+                "atanf" => Some(dlls::crt::crt_atanf as *const () as usize),
+                "exp2" => Some(dlls::crt::crt_exp2 as *const () as usize),
+                "sinhf" => Some(dlls::crt::crt_sinhf as *const () as usize),
+                "copysignf" => Some(dlls::crt::crt_copysignf as *const () as usize),
+                "_isnan" => Some(dlls::crt::crt_isnan as *const () as usize),
+                "_finite" => Some(dlls::crt::crt_finite as *const () as usize),
+                "modf" => Some(dlls::crt::crt_modf as *const () as usize),
+                "modff" => Some(dlls::crt::crt_modff as *const () as usize),
+                "strtok" => Some(dlls::crt::crt_strtok as *const () as usize),
+                "strpbrk" => Some(dlls::crt::crt_strpbrk as *const () as usize),
+                "strcspn" => Some(dlls::crt::crt_strcspn as *const () as usize),
+                "strspn" => Some(dlls::crt::crt_strspn as *const () as usize),
+                "strncat" => Some(dlls::crt::crt_strncat as *const () as usize),
+                "strncat_s" => Some(dlls::crt::crt_strncat_s as *const () as usize),
+                "strtoll" => Some(dlls::crt::crt_strtoll as *const () as usize),
+                "strcoll" => Some(dlls::crt::crt_strcoll as *const () as usize),
+                "strerror" => Some(dlls::crt::crt_strerror as *const () as usize),
+                "strerror_s" => Some(dlls::crt::crt_strerror_s as *const () as usize),
+                "wcscoll" => Some(dlls::crt::crt_wcscoll as *const () as usize),
+                "wcsncat_s" => Some(dlls::crt::crt_wcsncat_s as *const () as usize),
+                "__std_type_info_name" => {
+                    Some(dlls::crt::crt_std_type_info_name as *const () as usize)
+                }
+                "__std_type_info_compare" => {
+                    Some(dlls::crt::crt_std_type_info_compare as *const () as usize)
+                }
+                "__tzname" => Some(dlls::crt::crt_tzname as *const () as usize),
+                "__timezone" => Some(dlls::crt::crt_timezone as *const () as usize),
+                "__daylight" => Some(dlls::crt::crt_daylight as *const () as usize),
+                "_tzset" => Some(dlls::crt::crt_tzset as *const () as usize),
+                "___lc_codepage_func" => {
+                    Some(dlls::crt::crt_lc_codepage_func as *const () as usize)
+                }
+                "_localtime64_s" => Some(dlls::crt::crt_localtime64_s as *const () as usize),
+                "_gmtime64_s" => Some(dlls::crt::crt_gmtime64_s as *const () as usize),
                 // Catch-all for unimplemented CRT functions: return a safe no-op stub
                 // rather than leaving them unresolved (which causes SIGSEGV)
                 _ => {
@@ -2685,6 +3078,8 @@ impl IatSymbolResolver {
             "OLE32.DLL" | "COMBASE.DLL" => match func_name {
                 "CoInitializeEx" => Some(dlls::shell::CoInitializeEx as *const () as usize),
                 "CoUninitialize" => Some(dlls::shell::CoUninitialize as *const () as usize),
+                "OleInitialize" => Some(dlls::shell::OleInitialize as *const () as usize),
+                "OleUninitialize" => Some(dlls::shell::OleUninitialize as *const () as usize),
                 "CoCreateInstance" => Some(dlls::shell::CoCreateInstance as *const () as usize),
                 "CoCreateGuid" => Some(dlls::shell::CoCreateGuid as *const () as usize),
                 "StringFromGUID2" => Some(dlls::shell::StringFromGUID2 as *const () as usize),
@@ -2704,6 +3099,7 @@ impl IatSymbolResolver {
                 "SysStringLen" => Some(dlls::shell::SysStringLen as *const () as usize),
                 "SysStringByteLen" => Some(dlls::shell::SysStringByteLen as *const () as usize),
                 "VariantInit" => Some(dlls::shell::VariantInit as *const () as usize),
+                "VariantClear" => Some(dlls::shell::VariantClear as *const () as usize),
                 "SafeArrayCreate" => Some(dlls::shell::SafeArrayCreate as *const () as usize),
                 "SafeArrayDestroy" => Some(dlls::shell::SafeArrayDestroy as *const () as usize),
                 "SafeArrayGetDim" => Some(dlls::shell::SafeArrayGetDim as *const () as usize),
@@ -2873,6 +3269,21 @@ impl IatSymbolResolver {
                 }
                 _ => None,
             },
+            "X3DAUDIO1_7.DLL" | "X3DAUDIO1_7" | "x3daudio1_7.dll" => match func_name {
+                "X3DAudioInitialize" => Some(dlls::wasapi::X3DAudioInitialize as *const () as usize),
+                "X3DAudioCalculate" => Some(dlls::wasapi::X3DAudioCalculate as *const () as usize),
+                _ => None,
+            },
+            "XAPOFX1_5.DLL" | "XAPOFX1_5" | "xapofx1_5.dll" => match func_name {
+                "CreateFX" => Some(dlls::wasapi::CreateFX as *const () as usize),
+                _ => None,
+            },
+            "MMDEVAPI.DLL" | "MMDEVAPI" | "mmdevapi.dll" => match func_name {
+                "ActivateAudioInterfaceAsync" | "#17" => {
+                    Some(dlls::wasapi::ActivateAudioInterfaceAsync as *const () as usize)
+                }
+                _ => None,
+            },
             "DWMAPI.DLL" | "DWMAPI" | "dwmapi.dll" => match func_name {
                 "DwmEnableBlurBehindWindow" => {
                     Some(dlls::dwmapi::DwmEnableBlurBehindWindow as *const () as usize)
@@ -2887,6 +3298,9 @@ impl IatSymbolResolver {
                     Some(dlls::dwmapi::DwmIsCompositionEnabled as *const () as usize)
                 }
                 "DwmFlush" => Some(dlls::dwmapi::DwmFlush as *const () as usize),
+                "DwmGetCompositionTimingInfo" => {
+                    Some(dlls::dwmapi::DwmGetCompositionTimingInfo as *const () as usize)
+                }
                 _ => None,
             },
             "SETUPAPI.DLL" | "SETUPAPI" | "setupapi.dll" | "setupapi" | "CFGMGR32.DLL" | "CFGMGR32" | "cfgmgr32.dll" | "cfgmgr32" => {
@@ -2899,6 +3313,15 @@ impl IatSymbolResolver {
                         }
                         "SetupDiGetClassDevsW" => {
                             Some(dlls::setupapi::SetupDiGetClassDevsW as *const () as usize)
+                        }
+                        "SetupDiGetClassDevsExW" => {
+                            Some(dlls::setupapi::SetupDiGetClassDevsExW as *const () as usize)
+                        }
+                        "SetupDiGetClassDevsExA" => {
+                            Some(dlls::setupapi::SetupDiGetClassDevsExA as *const () as usize)
+                        }
+                        "SetupGetInfDriverStoreLocationW" => {
+                            Some(dlls::setupapi::SetupGetInfDriverStoreLocationW as *const () as usize)
                         }
                         "SetupDiEnumDeviceInterfaces" => {
                             Some(dlls::setupapi::SetupDiEnumDeviceInterfaces as *const () as usize)
@@ -3021,9 +3444,22 @@ impl IatSymbolResolver {
                 }
                 _ => None,
             },
+            "D3D9.DLL" | "D3D9" | "d3d9.dll" => match func_name {
+                "D3DPERF_BeginEvent" => Some(dlls::generated::d3d9::D3DPERF_BeginEvent as *const () as usize),
+                "D3DPERF_EndEvent" => Some(dlls::generated::d3d9::D3DPERF_EndEvent as *const () as usize),
+                "D3DPERF_SetMarker" => Some(dlls::generated::d3d9::D3DPERF_SetMarker as *const () as usize),
+                "D3DPERF_GetStatus" => Some(dlls::generated::d3d9::D3DPERF_GetStatus as *const () as usize),
+                "D3DPERF_QueryRepeatFrame" => Some(dlls::generated::d3d9::D3DPERF_QueryRepeatFrame as *const () as usize),
+                "D3DPERF_SetOptions" => Some(dlls::generated::d3d9::D3DPERF_SetOptions as *const () as usize),
+                "D3DPERF_SetRegion" => Some(dlls::generated::d3d9::D3DPERF_SetRegion as *const () as usize),
+                _ => None,
+            },
             "WINHTTP.DLL" | "WINHTTP" | "winhttp.dll" => match func_name {
                 "WinHttpGetIEProxyConfigForCurrentUser" => {
                     Some(dlls::winhttp::WinHttpGetIEProxyConfigForCurrentUser as *const () as usize)
+                }
+                "WinHttpGetDefaultProxyConfiguration" => {
+                    Some(dlls::winhttp::WinHttpGetDefaultProxyConfiguration as *const () as usize)
                 }
                 "WinHttpOpen" => {
                     Some(dlls::winhttp::WinHttpOpen as *const () as usize)
@@ -3093,6 +3529,9 @@ impl IatSymbolResolver {
                 "GetAdaptersAddresses" => Some(dlls::iphlpapi::GetAdaptersAddresses as *const () as usize),
                 "GetNetworkParams" => Some(dlls::iphlpapi::GetNetworkParams as *const () as usize),
                 "GetBestInterfaceEx" => Some(dlls::iphlpapi::GetBestInterfaceEx as *const () as usize),
+                "NotifyAddrChange" => Some(dlls::iphlpapi::NotifyAddrChange as *const () as usize),
+                "NotifyRouteChange" => Some(dlls::iphlpapi::NotifyRouteChange as *const () as usize),
+                "CancelIPChangeNotify" => Some(dlls::iphlpapi::CancelIPChangeNotify as *const () as usize),
                 _ => None,
             },
             "UIAUTOMATIONCORE.DLL" | "UIAUTOMATIONCORE" | "uiautomationcore.dll" => match func_name {
@@ -3105,6 +3544,36 @@ impl IatSymbolResolver {
                 "UiaRaiseAutomationEvent" => Some(dlls::uiautomation::UiaRaiseAutomationEvent as *const () as usize),
                 "UiaGetReservedMixedAttributeValue" => Some(dlls::uiautomation::UiaGetReservedMixedAttributeValue as *const () as usize),
                 "UiaGetReservedNotSupportedValue" => Some(dlls::uiautomation::UiaGetReservedNotSupportedValue as *const () as usize),
+                _ => None,
+            },
+            "MF.DLL" | "MF" | "mf.dll"
+            | "MFPLAT.DLL" | "MFPLAT" | "mfplat.dll"
+            | "MFREADWRITE.DLL" | "MFREADWRITE" | "mfreadwrite.dll"
+            | "MFPLAY.DLL" | "MFPLAY" | "mfplay.dll" => match func_name {
+                "MFStartup" => Some(dlls::mf::MFStartup as *const () as usize),
+                "MFShutdown" => Some(dlls::mf::MFShutdown as *const () as usize),
+                "MFCreateAttributes" => Some(dlls::mf::MFCreateAttributes as *const () as usize),
+                "MFCreateMediaType" => Some(dlls::mf::MFCreateMediaType as *const () as usize),
+                "MFCreateAlignedMemoryBuffer" => Some(dlls::mf::MFCreateAlignedMemoryBuffer as *const () as usize),
+                "MFCreateSample" => Some(dlls::mf::MFCreateSample as *const () as usize),
+                "MFCreateEventQueue" => Some(dlls::mf::MFCreateEventQueue as *const () as usize),
+                "MFCreateAsyncResult" => Some(dlls::mf::MFCreateAsyncResult as *const () as usize),
+                "MFInvokeCallback" => Some(dlls::mf::MFInvokeCallback as *const () as usize),
+                "MFPutWorkItem" => Some(dlls::mf::MFPutWorkItem as *const () as usize),
+                "MFPutWaitingWorkItem" => Some(dlls::mf::MFPutWaitingWorkItem as *const () as usize),
+                "MFCreateDXGIDeviceManager" => Some(dlls::mf::MFCreateDXGIDeviceManager as *const () as usize),
+                "MFCreateSourceResolver" => Some(dlls::mf::MFCreateSourceResolver as *const () as usize),
+                "MFCreateMediaSession" => Some(dlls::mf::MFCreateMediaSession as *const () as usize),
+                "MFCreateTopology" => Some(dlls::mf::MFCreateTopology as *const () as usize),
+                "MFCreateTopologyNode" => Some(dlls::mf::MFCreateTopologyNode as *const () as usize),
+                "MFCreateSampleGrabberSinkActivate" => Some(dlls::mf::MFCreateSampleGrabberSinkActivate as *const () as usize),
+                "MFCreateAudioRendererActivate" => Some(dlls::mf::MFCreateAudioRendererActivate as *const () as usize),
+                "MFGetService" => Some(dlls::mf::MFGetService as *const () as usize),
+                "MFEnumDeviceSources" => Some(dlls::mf::MFEnumDeviceSources as *const () as usize),
+                "MFCreateDeviceSource" => Some(dlls::mf::MFCreateDeviceSource as *const () as usize),
+                "MFCreateSinkWriterFromURL" => Some(dlls::mf::MFCreateSinkWriterFromURL as *const () as usize),
+                "MFPCreateMediaPlayer" => Some(dlls::mf::MFPCreateMediaPlayer as *const () as usize),
+                "MFPCreateMediaPlayerEx" => Some(dlls::mf::MFPCreateMediaPlayerEx as *const () as usize),
                 _ => None,
             },
             _ => None,

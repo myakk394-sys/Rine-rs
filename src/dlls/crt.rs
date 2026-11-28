@@ -1790,6 +1790,45 @@ pub unsafe extern "win64" fn __stdio_common_vsprintf(
     format_win64_vsprintf(buffer, buffer_count, format, arglist)
 }
 
+pub unsafe extern "win64" fn __stdio_common_vswprintf(
+    _options: u64,
+    buffer: *mut u16,
+    buffer_count: usize,
+    format: *const u16,
+    _locale: *mut std::ffi::c_void,
+    arglist: *mut u64,
+) -> i32 {
+    format_win64_vswprintf(buffer, buffer_count, format, arglist)
+}
+
+pub unsafe extern "win64" fn _vsnwprintf_s(
+    buffer: *mut u16,
+    size_of_buffer: usize,
+    _count: usize,
+    format: *const u16,
+    arglist: *mut u64,
+) -> i32 {
+    format_win64_vswprintf(buffer, size_of_buffer, format, arglist)
+}
+
+pub unsafe extern "win64" fn _vsnwprintf(
+    buffer: *mut u16,
+    count: usize,
+    format: *const u16,
+    arglist: *mut u64,
+) -> i32 {
+    format_win64_vswprintf(buffer, count, format, arglist)
+}
+
+pub unsafe extern "win64" fn vswprintf_s(
+    buffer: *mut u16,
+    size_of_buffer: usize,
+    format: *const u16,
+    arglist: *mut u64,
+) -> i32 {
+    format_win64_vswprintf(buffer, size_of_buffer, format, arglist)
+}
+
 pub unsafe extern "win64" fn __stdio_common_vfprintf(
     _options: u64,
     stream: *mut libc::FILE,
@@ -2740,6 +2779,772 @@ pub unsafe extern "win64" fn msvcrt_frexp(x: f64, exp: *mut i32) -> f64 {
     x
 }
 pub unsafe extern "win64" fn msvcrt_generic_stub() -> usize {
+    0
+}
+
+// ============================================================================
+// MSVCP140 C++ Concurrency & STL Support (_Mtx_*, _Cnd_*, _Thrd_*, _Lockit)
+// ============================================================================
+
+struct MtxBox(Box<libc::pthread_mutex_t>);
+unsafe impl Send for MtxBox {}
+unsafe impl Sync for MtxBox {}
+
+struct CndBox(Box<libc::pthread_cond_t>);
+unsafe impl Send for CndBox {}
+unsafe impl Sync for CndBox {}
+
+static MSVCP_MTX_MAP: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, MtxBox>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+static MSVCP_CND_MAP: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, CndBox>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+unsafe fn create_recursive_pthread_mutex() -> Box<libc::pthread_mutex_t> {
+    let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
+    libc::pthread_mutexattr_init(&mut attr);
+    libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
+    let mut mtx = Box::new(std::mem::zeroed::<libc::pthread_mutex_t>());
+    libc::pthread_mutex_init(&mut *mtx, &attr);
+    libc::pthread_mutexattr_destroy(&mut attr);
+    mtx
+}
+
+unsafe fn get_or_init_msvcp_mtx(mtx_key: usize) -> *mut libc::pthread_mutex_t {
+    let mut map = MSVCP_MTX_MAP.lock().unwrap();
+    let entry = map
+        .entry(mtx_key)
+        .or_insert_with(|| MtxBox(create_recursive_pthread_mutex()));
+    &mut *entry.0 as *mut libc::pthread_mutex_t
+}
+
+unsafe fn get_or_init_msvcp_cnd(cnd_key: usize) -> *mut libc::pthread_cond_t {
+    let mut map = MSVCP_CND_MAP.lock().unwrap();
+    let entry = map.entry(cnd_key).or_insert_with(|| {
+        let mut cnd = Box::new(std::mem::zeroed::<libc::pthread_cond_t>());
+        libc::pthread_cond_init(&mut *cnd, std::ptr::null());
+        CndBox(cnd)
+    });
+    &mut *entry.0 as *mut libc::pthread_cond_t
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_init_in_situ(mtx: usize, _type: i32) -> i32 {
+    if mtx == 0 {
+        return 1; // _Thrd_nomem / error
+    }
+    let _ = get_or_init_msvcp_mtx(mtx);
+    0 // _Thrd_success
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_init(pmtx: *mut usize, type_val: i32) -> i32 {
+    if pmtx.is_null() {
+        return 1;
+    }
+    let key = Box::into_raw(Box::new(0u64)) as usize;
+    *pmtx = key;
+    _Mtx_init_in_situ(key, type_val)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_destroy_in_situ(mtx: usize) {
+    if let Some(mut b) = MSVCP_MTX_MAP.lock().unwrap().remove(&mtx) {
+        libc::pthread_mutex_destroy(&mut *b.0);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_destroy(pmtx: usize) {
+    _Mtx_destroy_in_situ(pmtx);
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_lock(mtx: usize) -> i32 {
+    if mtx == 0 {
+        return 1;
+    }
+    let ptr = get_or_init_msvcp_mtx(mtx);
+    if libc::pthread_mutex_lock(ptr) == 0 { 0 } else { 4 }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_trylock(mtx: usize) -> i32 {
+    if mtx == 0 {
+        return 1;
+    }
+    let ptr = get_or_init_msvcp_mtx(mtx);
+    if libc::pthread_mutex_trylock(ptr) == 0 { 0 } else { 2 } // _Thrd_busy = 2
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_unlock(mtx: usize) -> i32 {
+    if mtx == 0 {
+        return 1;
+    }
+    let ptr = get_or_init_msvcp_mtx(mtx);
+    if libc::pthread_mutex_unlock(ptr) == 0 { 0 } else { 4 }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_current_owns(_mtx: usize) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_clear_owner(_mtx: usize) {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Mtx_reset_owner(_mtx: usize) {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Cnd_init_in_situ(cnd: usize) -> i32 {
+    if cnd == 0 {
+        return 1;
+    }
+    let _ = get_or_init_msvcp_cnd(cnd);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Cnd_init(pcnd: *mut usize) -> i32 {
+    if pcnd.is_null() {
+        return 1;
+    }
+    let key = Box::into_raw(Box::new(0u64)) as usize;
+    *pcnd = key;
+    _Cnd_init_in_situ(key)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Cnd_destroy_in_situ(cnd: usize) {
+    if let Some(mut b) = MSVCP_CND_MAP.lock().unwrap().remove(&cnd) {
+        libc::pthread_cond_destroy(&mut *b.0);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Cnd_destroy(cnd: usize) {
+    _Cnd_destroy_in_situ(cnd);
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Cnd_wait(cnd: usize, mtx: usize) -> i32 {
+    if cnd == 0 || mtx == 0 {
+        return 1;
+    }
+    let cptr = get_or_init_msvcp_cnd(cnd);
+    let mptr = get_or_init_msvcp_mtx(mtx);
+    if libc::pthread_cond_wait(cptr, mptr) == 0 { 0 } else { 4 }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Cnd_signal(cnd: usize) -> i32 {
+    if cnd == 0 {
+        return 1;
+    }
+    let cptr = get_or_init_msvcp_cnd(cnd);
+    if libc::pthread_cond_signal(cptr) == 0 { 0 } else { 4 }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Cnd_broadcast(cnd: usize) -> i32 {
+    if cnd == 0 {
+        return 1;
+    }
+    let cptr = get_or_init_msvcp_cnd(cnd);
+    if libc::pthread_cond_broadcast(cptr) == 0 { 0 } else { 4 }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Cnd_do_broadcast_at_thread_exit() {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Thrd_id() -> u32 {
+    libc::syscall(libc::SYS_gettid) as u32
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Thrd_yield() {
+    libc::sched_yield();
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Thrd_start(
+    thr: *mut u64,
+    func: usize,
+    arg: usize,
+) -> i32 {
+    if thr.is_null() || func == 0 {
+        return 4;
+    }
+    let mut tid: u32 = 0;
+    let h = crate::dlls::kernel32::CreateThread(
+        std::ptr::null_mut(),
+        0,
+        func as u64,
+        arg as u64,
+        0,
+        &mut tid,
+    );
+    if h == 0 {
+        return 4;
+    }
+    *thr = h;
+    *(thr.add(1) as *mut u32) = tid;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn _Thrd_join(thr_hnd: u64, _thr_id: u32, code: *mut i32) -> i32 {
+    if thr_hnd != 0 {
+        crate::dlls::kernel32::WaitForSingleObject(thr_hnd, 0xFFFFFFFF);
+    }
+    if !code.is_null() {
+        *code = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn msvcp_lockit_ctor(this: usize, _kind: i32) -> usize {
+    this
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn msvcp_lockit_dtor(_this: usize) {}
+
+// ============================================================================
+// Ctype / Wctype / Wide String / Math functions required by UE4 (FChar, FPaths, FString)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswalpha(c: u16) -> i32 {
+    if char::from_u32(c as u32).map(|ch| ch.is_alphabetic()).unwrap_or(false) { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswalnum(c: u16) -> i32 {
+    if char::from_u32(c as u32).map(|ch| ch.is_alphanumeric()).unwrap_or(false) { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswdigit(c: u16) -> i32 {
+    if (c as u8 as char).is_ascii_digit() && c < 128 { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswlower(c: u16) -> i32 {
+    if char::from_u32(c as u32).map(|ch| ch.is_lowercase()).unwrap_or(false) { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswupper(c: u16) -> i32 {
+    if char::from_u32(c as u32).map(|ch| ch.is_uppercase()).unwrap_or(false) { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswspace(c: u16) -> i32 {
+    if char::from_u32(c as u32).map(|ch| ch.is_whitespace()).unwrap_or(false) { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswxdigit(c: u16) -> i32 {
+    if c < 128 && (c as u8 as char).is_ascii_hexdigit() { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswprint(c: u16) -> i32 {
+    if c >= 0x20 && c != 0x7F { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswgraph(c: u16) -> i32 {
+    if c > 0x20 && c != 0x7F { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_iswctype(c: u16, desc: u16) -> i32 {
+    // Win32 wctype bitmask: _UPPER=1, _LOWER=2, _DIGIT=4, _SPACE=8, _PUNCT=0x10, _CONTROL=0x20, _BLANK=0x40, _HEX=0x80, _ALPHA=0x100
+    let mut mask = 0u16;
+    if crt_iswupper(c) != 0 { mask |= 0x0001; }
+    if crt_iswlower(c) != 0 { mask |= 0x0002; }
+    if crt_iswdigit(c) != 0 { mask |= 0x0004; }
+    if crt_iswspace(c) != 0 { mask |= 0x0008; }
+    if crt_iswxdigit(c) != 0 { mask |= 0x0080; }
+    if crt_iswalpha(c) != 0 { mask |= 0x0100; }
+    if (mask & desc) != 0 { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_isalnum(c: i32) -> i32 {
+    if (c as u32) < 256 && (c as u8).is_ascii_alphanumeric() { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_islower(c: i32) -> i32 {
+    if (c as u32) < 256 && (c as u8).is_ascii_lowercase() { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_isupper(c: i32) -> i32 {
+    if (c as u32) < 256 && (c as u8).is_ascii_uppercase() { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_isxdigit(c: i32) -> i32 {
+    if (c as u32) < 256 && (c as u8).is_ascii_hexdigit() { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_isprint(c: i32) -> i32 {
+    if (c as u32) >= 0x20 && (c as u32) < 0x7F { 1 } else { 0 }
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_isgraph(c: i32) -> i32 {
+    if (c as u32) > 0x20 && (c as u32) < 0x7F { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wcsnicmp(s1: *const u16, s2: *const u16, n: usize) -> i32 {
+    if s1.is_null() || s2.is_null() {
+        return 0;
+    }
+    for i in 0..n {
+        let a = *s1.add(i);
+        let b = *s2.add(i);
+        let la = if a < 128 { (a as u8).to_ascii_lowercase() as u16 } else { a };
+        let lb = if b < 128 { (b as u8).to_ascii_lowercase() as u16 } else { b };
+        if la != lb || a == 0 {
+            return (la as i32) - (lb as i32);
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wcsstr(haystack: *const u16, needle: *const u16) -> *const u16 {
+    if haystack.is_null() || needle.is_null() {
+        return std::ptr::null();
+    }
+    if *needle == 0 {
+        return haystack;
+    }
+    let mut h = haystack;
+    while *h != 0 {
+        let mut i = 0usize;
+        while *needle.add(i) != 0 && *h.add(i) == *needle.add(i) {
+            i += 1;
+        }
+        if *needle.add(i) == 0 {
+            return h;
+        }
+        h = h.add(1);
+    }
+    std::ptr::null()
+}
+
+unsafe fn read_wstr_trimmed(s: *const u16) -> (String, usize) {
+    if s.is_null() {
+        return (String::new(), 0);
+    }
+    let mut i = 0usize;
+    while *s.add(i) != 0 && (*s.add(i) == b' ' as u16 || *s.add(i) == b'\t' as u16) {
+        i += 1;
+    }
+    let start = i;
+    while *s.add(i) != 0 && i < 256 {
+        i += 1;
+    }
+    let raw = String::from_utf16_lossy(std::slice::from_raw_parts(s.add(start), i - start));
+    (raw, start)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wcstod(s: *const u16, endptr: *mut *const u16) -> f64 {
+    let (raw, _) = read_wstr_trimmed(s);
+    let mut end_idx = 0usize;
+    for (idx, ch) in raw.char_indices() {
+        if ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | 'e' | 'E') {
+            end_idx = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let val = raw[..end_idx].trim().parse::<f64>().unwrap_or(0.0);
+    if !endptr.is_null() && !s.is_null() {
+        *endptr = s.add(end_idx);
+    }
+    val
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wcstoi64(s: *const u16, endptr: *mut *const u16, base: i32) -> i64 {
+    let (raw, start) = read_wstr_trimmed(s);
+    let radix = if base == 0 {
+        if raw.starts_with("0x") || raw.starts_with("0X") { 16 } else { 10 }
+    } else {
+        base.clamp(2, 36) as u32
+    };
+    let slice = if radix == 16 && (raw.starts_with("0x") || raw.starts_with("0X")) {
+        &raw[2..]
+    } else {
+        raw.as_str()
+    };
+    let mut len = 0usize;
+    for (idx, ch) in slice.char_indices() {
+        if (idx == 0 && (ch == '-' || ch == '+')) || ch.is_digit(radix) {
+            len = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let val = i64::from_str_radix(&slice[..len], radix).unwrap_or(0);
+    if !endptr.is_null() && !s.is_null() {
+        let prefix = if radix == 16 && (raw.starts_with("0x") || raw.starts_with("0X")) { 2 } else { 0 };
+        *endptr = s.add(start + prefix + len);
+    }
+    val
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wcstoui64(s: *const u16, endptr: *mut *const u16, base: i32) -> u64 {
+    crt_wcstoi64(s, endptr, base) as u64
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wcstoul(s: *const u16, endptr: *mut *const u16, base: i32) -> u32 {
+    crt_wcstoi64(s, endptr, base) as u32
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wtof(s: *const u16) -> f64 {
+    crt_wcstod(s, std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wtoi(s: *const u16) -> i32 {
+    crt_wcstoi64(s, std::ptr::null_mut(), 10) as i32
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wtoi64(s: *const u16) -> i64 {
+    crt_wcstoi64(s, std::ptr::null_mut(), 10)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strnlen(s: *const u8, maxlen: usize) -> usize {
+    if s.is_null() {
+        return 0;
+    }
+    let mut i = 0usize;
+    while i < maxlen && *s.add(i) != 0 {
+        i += 1;
+    }
+    i
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_acos(x: f64) -> f64 { x.acos() }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_acosf(x: f32) -> f32 { x.acos() }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_asin(x: f64) -> f64 { x.asin() }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_asinf(x: f32) -> f32 { x.asin() }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_atan(x: f64) -> f64 { x.atan() }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_atanf(x: f32) -> f32 { x.atan() }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_exp2(x: f64) -> f64 { x.exp2() }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_sinhf(x: f32) -> f32 { x.sinh() }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_copysignf(x: f32, y: f32) -> f32 { x.copysign(y) }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_isnan(x: f64) -> i32 { if x.is_nan() { 1 } else { 0 } }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_finite(x: f64) -> i32 { if x.is_finite() { 1 } else { 0 } }
+#[no_mangle]
+pub unsafe extern "win64" fn crt_modf(x: f64, iptr: *mut f64) -> f64 {
+    let trunc = x.trunc();
+    if !iptr.is_null() {
+        *iptr = trunc;
+    }
+    x - trunc
+}
+#[no_mangle]
+pub unsafe extern "win64" fn crt_modff(x: f32, iptr: *mut f32) -> f32 {
+    let trunc = x.trunc();
+    if !iptr.is_null() {
+        *iptr = trunc;
+    }
+    x - trunc
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strtok(
+    s: *mut libc::c_char,
+    delim: *const libc::c_char,
+) -> *mut libc::c_char {
+    libc::strtok(s, delim)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strpbrk(
+    s: *const libc::c_char,
+    accept: *const libc::c_char,
+) -> *mut libc::c_char {
+    libc::strpbrk(s, accept)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strcspn(
+    s: *const libc::c_char,
+    reject: *const libc::c_char,
+) -> usize {
+    libc::strcspn(s, reject)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strspn(
+    s: *const libc::c_char,
+    accept: *const libc::c_char,
+) -> usize {
+    libc::strspn(s, accept)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strncat(
+    dest: *mut libc::c_char,
+    src: *const libc::c_char,
+    n: usize,
+) -> *mut libc::c_char {
+    libc::strncat(dest, src, n)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strncat_s(
+    dest: *mut libc::c_char,
+    destsz: usize,
+    src: *const libc::c_char,
+    count: usize,
+) -> i32 {
+    if dest.is_null() || src.is_null() || destsz == 0 {
+        return 22; // EINVAL
+    }
+    let mut dlen = 0usize;
+    while dlen < destsz && *dest.add(dlen) != 0 {
+        dlen += 1;
+    }
+    if dlen == destsz {
+        *dest = 0;
+        return 22;
+    }
+    let max_copy = if count == usize::MAX {
+        destsz - dlen - 1
+    } else {
+        count.min(destsz - dlen - 1)
+    };
+    let mut i = 0usize;
+    while i < max_copy && *src.add(i) != 0 {
+        *dest.add(dlen + i) = *src.add(i);
+        i += 1;
+    }
+    *dest.add(dlen + i) = 0;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strtoll(
+    nptr: *const libc::c_char,
+    endptr: *mut *mut libc::c_char,
+    base: i32,
+) -> i64 {
+    libc::strtoll(nptr, endptr, base)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strcoll(
+    s1: *const libc::c_char,
+    s2: *const libc::c_char,
+) -> i32 {
+    libc::strcoll(s1, s2)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strerror(errnum: i32) -> *mut libc::c_char {
+    libc::strerror(errnum)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_strerror_s(
+    buf: *mut libc::c_char,
+    bufsz: usize,
+    errnum: i32,
+) -> i32 {
+    if buf.is_null() || bufsz == 0 {
+        return 22;
+    }
+    let msg = libc::strerror(errnum);
+    if msg.is_null() {
+        *buf = 0;
+        return 0;
+    }
+    let mut i = 0usize;
+    while i + 1 < bufsz && *msg.add(i) != 0 {
+        *buf.add(i) = *msg.add(i);
+        i += 1;
+    }
+    *buf.add(i) = 0;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wcscoll(s1: *const u16, s2: *const u16) -> i32 {
+    if s1.is_null() || s2.is_null() {
+        return 0;
+    }
+    let mut i = 0usize;
+    loop {
+        let a = *s1.add(i);
+        let b = *s2.add(i);
+        if a != b || a == 0 {
+            return (a as i32) - (b as i32);
+        }
+        i += 1;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_wcsncat_s(
+    dest: *mut u16,
+    destsz: usize,
+    src: *const u16,
+    count: usize,
+) -> i32 {
+    if dest.is_null() || src.is_null() || destsz == 0 {
+        return 22;
+    }
+    let mut dlen = 0usize;
+    while dlen < destsz && *dest.add(dlen) != 0 {
+        dlen += 1;
+    }
+    if dlen == destsz {
+        *dest = 0;
+        return 22;
+    }
+    let max_copy = if count == usize::MAX {
+        destsz - dlen - 1
+    } else {
+        count.min(destsz - dlen - 1)
+    };
+    let mut i = 0usize;
+    while i < max_copy && *src.add(i) != 0 {
+        *dest.add(dlen + i) = *src.add(i);
+        i += 1;
+    }
+    *dest.add(dlen + i) = 0;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_std_type_info_name(
+    data: *const u8,
+    _node: usize,
+) -> *const libc::c_char {
+    if data.is_null() {
+        return b"unknown\0".as_ptr() as *const libc::c_char;
+    }
+    let cached = *(data as *const *const libc::c_char);
+    if !cached.is_null() {
+        return cached;
+    }
+    data.add(8) as *const libc::c_char
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_std_type_info_compare(
+    lhs: *const u8,
+    rhs: *const u8,
+) -> i32 {
+    if lhs == rhs {
+        return 0;
+    }
+    if lhs.is_null() {
+        return -1;
+    }
+    if rhs.is_null() {
+        return 1;
+    }
+    libc::strcmp(
+        lhs.add(8) as *const libc::c_char,
+        rhs.add(8) as *const libc::c_char,
+    )
+}
+
+static TZ_STD_NAME: &[u8] = b"UTC\0";
+static TZ_DST_NAME: &[u8] = b"UTC\0";
+static mut TZ_NAMES_PTRS: [*const libc::c_char; 2] = [
+    TZ_STD_NAME.as_ptr() as *const libc::c_char,
+    TZ_DST_NAME.as_ptr() as *const libc::c_char,
+];
+static mut TIMEZONE_SECS: i32 = 0;
+static mut DAYLIGHT_FLAG: i32 = 0;
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_tzname() -> *mut *const libc::c_char {
+    std::ptr::addr_of_mut!(TZ_NAMES_PTRS) as *mut *const libc::c_char
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_timezone() -> *mut i32 {
+    std::ptr::addr_of_mut!(TIMEZONE_SECS)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_daylight() -> *mut i32 {
+    std::ptr::addr_of_mut!(DAYLIGHT_FLAG)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_tzset() {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_lc_codepage_func() -> u32 {
+    65001 // CP_UTF8
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_localtime64_s(tm_out: *mut i32, time_in: *const i64) -> i32 {
+    if tm_out.is_null() || time_in.is_null() {
+        return 22;
+    }
+    let t = *time_in as libc::time_t;
+    let mut res: libc::tm = std::mem::zeroed();
+    if libc::localtime_r(&t, &mut res).is_null() {
+        return 22;
+    }
+    *tm_out.add(0) = res.tm_sec;
+    *tm_out.add(1) = res.tm_min;
+    *tm_out.add(2) = res.tm_hour;
+    *tm_out.add(3) = res.tm_mday;
+    *tm_out.add(4) = res.tm_mon;
+    *tm_out.add(5) = res.tm_year;
+    *tm_out.add(6) = res.tm_wday;
+    *tm_out.add(7) = res.tm_yday;
+    *tm_out.add(8) = res.tm_isdst;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn crt_gmtime64_s(tm_out: *mut i32, time_in: *const i64) -> i32 {
+    if tm_out.is_null() || time_in.is_null() {
+        return 22;
+    }
+    let t = *time_in as libc::time_t;
+    let mut res: libc::tm = std::mem::zeroed();
+    if libc::gmtime_r(&t, &mut res).is_null() {
+        return 22;
+    }
+    *tm_out.add(0) = res.tm_sec;
+    *tm_out.add(1) = res.tm_min;
+    *tm_out.add(2) = res.tm_hour;
+    *tm_out.add(3) = res.tm_mday;
+    *tm_out.add(4) = res.tm_mon;
+    *tm_out.add(5) = res.tm_year;
+    *tm_out.add(6) = res.tm_wday;
+    *tm_out.add(7) = res.tm_yday;
+    *tm_out.add(8) = res.tm_isdst;
     0
 }
 

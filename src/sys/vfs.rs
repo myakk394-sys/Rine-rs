@@ -259,6 +259,12 @@ impl RineVfs {
 
         // Map Steam virtual path "C:\Program Files (x86)\Steam" to host Steam directory
         let lower_slash = normalized_slash.to_ascii_lowercase();
+        let trimmed_lower = lower_slash.trim_end_matches('/');
+        if trimmed_lower == "c:/program files (x86)" {
+            let pf86 = self.drive_c_root.join("Program Files (x86)");
+            let _ = std::fs::create_dir_all(&pf86);
+            return pf86.to_string_lossy().to_string();
+        }
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         if lower_slash.starts_with("c:/program files (x86)/steam") {
             let sub = &normalized_slash["c:/program files (x86)/steam".len()..];

@@ -198,8 +198,14 @@ pub unsafe extern "win64" fn mock_vtable_get_available_game_languages(
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn mock_vtable_get_steam_id(_this: *mut c_void) -> u64 {
-    DEFAULT_STEAM_ID
+pub unsafe extern "win64" fn mock_vtable_get_steam_id(
+    _this: *mut c_void,
+    out_steam_id: *mut u64,
+) -> *mut u64 {
+    if !out_steam_id.is_null() {
+        *out_steam_id = DEFAULT_STEAM_ID;
+    }
+    out_steam_id
 }
 
 #[no_mangle]
@@ -509,6 +515,10 @@ pub unsafe extern "win64" fn SteamAPI_RunCallbacks() {
                             let msg = b"OK\0";
                             status.m_debug_msg[..msg.len()].copy_from_slice(msg);
                             run_fn(p_cb, &status as *const _ as *const c_void);
+                        }
+                        // Do not dispatch shutdown/disconnect/failure/modal-dismissal events on startup
+                        102 | 103 | 115 | 702 | 704 | 714 | 738 => {
+                            println!("[RINE STEAM] Skipping event callback ({}) on startup", i_cb);
                         }
                         _ => {
                             println!("[RINE STEAM] Dispatching generic callback ({}) to {:p}", i_cb, p_cb);
@@ -1369,11 +1379,85 @@ pub unsafe extern "win64" fn SteamAPI_ISteamApps_BIsSubscribedFromFreeWeekend(
     0
 }
 
+fn map_locale_to_steam_language(locale: &str) -> &'static [u8] {
+    let lower = locale.trim().to_ascii_lowercase();
+    let base = lower.split('.').next().unwrap_or("");
+    if base.starts_with("ru") {
+        b"russian\0"
+    } else if base.starts_with("uk") {
+        b"ukrainian\0"
+    } else if base.starts_with("de") {
+        b"german\0"
+    } else if base.starts_with("fr") {
+        b"french\0"
+    } else if base.starts_with("es") {
+        b"spanish\0"
+    } else if base.starts_with("pt_br") || base.starts_with("pt-br") {
+        b"brazilian\0"
+    } else if base.starts_with("pt") {
+        b"portuguese\0"
+    } else if base.starts_with("it") {
+        b"italian\0"
+    } else if base.starts_with("pl") {
+        b"polish\0"
+    } else if base.starts_with("tr") {
+        b"turkish\0"
+    } else if base.starts_with("ja") {
+        b"japanese\0"
+    } else if base.starts_with("ko") {
+        b"koreana\0"
+    } else if base.starts_with("zh_tw")
+        || base.starts_with("zh-tw")
+        || base.starts_with("zh_hk")
+        || base.starts_with("zh_hant")
+    {
+        b"tchinese\0"
+    } else if base.starts_with("zh") {
+        b"schinese\0"
+    } else {
+        b"english\0"
+    }
+}
+
+fn detect_steam_language() -> &'static [u8] {
+    static CACHED_LANG: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
+    *CACHED_LANG.get_or_init(|| {
+        if let Ok(lang) = std::env::var("RINE_STEAM_LANGUAGE") {
+            let trimmed = lang.trim().to_ascii_lowercase();
+            return match trimmed.as_str() {
+                "russian" => b"russian\0",
+                "ukrainian" => b"ukrainian\0",
+                "german" => b"german\0",
+                "french" => b"french\0",
+                "spanish" => b"spanish\0",
+                "brazilian" => b"brazilian\0",
+                "portuguese" => b"portuguese\0",
+                "italian" => b"italian\0",
+                "polish" => b"polish\0",
+                "turkish" => b"turkish\0",
+                "japanese" => b"japanese\0",
+                "koreana" => b"koreana\0",
+                "tchinese" => b"tchinese\0",
+                "schinese" => b"schinese\0",
+                _ => map_locale_to_steam_language(&trimmed),
+            };
+        }
+        for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+            if let Ok(val) = std::env::var(key) {
+                if !val.trim().is_empty() && val != "C" && val != "POSIX" {
+                    return map_locale_to_steam_language(&val);
+                }
+            }
+        }
+        b"english\0"
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "win64" fn SteamAPI_ISteamApps_GetCurrentGameLanguage(
     _this: *mut c_void,
 ) -> *const c_char {
-    b"english\0".as_ptr() as *const c_char
+    detect_steam_language().as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -1540,7 +1624,7 @@ pub unsafe extern "win64" fn SteamAPI_ISteamUtils_BOverlayNeedsPresent(_this: *m
 
 #[no_mangle]
 pub unsafe extern "win64" fn SteamAPI_ISteamUtils_GetSteamUILanguage(_this: *mut c_void) -> *const c_char {
-    b"english\0".as_ptr() as *const c_char
+    detect_steam_language().as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -2164,8 +2248,22 @@ pub unsafe extern "win64" fn SteamInternal_FindOrCreateUtilsInterface(
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn SteamInternal_ContextInit(_p_context: *mut c_void) -> *mut c_void {
-    get_mock_steam_interface()
+pub unsafe extern "win64" fn SteamInternal_ContextInit(p_context: *mut c_void) -> *mut c_void {
+    if p_context.is_null() {
+        return get_mock_steam_interface();
+    }
+    let slots = p_context as *mut usize;
+    let p_fn = *slots.add(0);
+    let counter = *slots.add(1);
+    let out_ctx = slots.add(2) as *mut c_void;
+    if counter == 0 {
+        *slots.add(1) = 1;
+        if p_fn != 0 {
+            let init_fn: unsafe extern "win64" fn(*mut c_void) = std::mem::transmute(p_fn);
+            init_fn(out_ctx);
+        }
+    }
+    out_ctx
 }
 
 #[no_mangle]
@@ -2224,13 +2322,24 @@ pub fn resolve_steam_symbol(fn_name: &str) -> Option<usize> {
         "SteamAPI_ReleaseCurrentThreadMemory" => {
             Some(SteamAPI_ReleaseCurrentThreadMemory as *const () as usize)
         }
-        "SteamAPI_GetHSteamPipe" | "Steam_GetHSteamPipe" => {
+        "SteamAPI_GetHSteamPipe" | "Steam_GetHSteamPipe" | "SteamGameServer_GetHSteamPipe" => {
             Some(SteamAPI_GetHSteamPipe as *const () as usize)
         }
         "SteamAPI_GetHSteamUser"
         | "Steam_GetHSteamUser"
-        | "Steam_GetHSteamUserCurrent" => {
+        | "Steam_GetHSteamUserCurrent"
+        | "SteamGameServer_GetHSteamUser" => {
             Some(SteamAPI_GetHSteamUser as *const () as usize)
+        }
+        "SteamGameServer_Init" | "SteamInternal_GameServer_Init" => {
+            Some(SteamInternal_SteamAPI_Init as *const () as usize)
+        }
+        "SteamGameServer_Shutdown" => Some(SteamAPI_Shutdown as *const () as usize),
+        "SteamGameServer_RunCallbacks" => Some(SteamAPI_RunCallbacks as *const () as usize),
+        "SteamGameServer_BSecure" => Some(steam_generic_stub as *const () as usize),
+        "SteamGameServer_GetSteamID" => Some(steam_generic_stub as *const () as usize),
+        "SteamInternal_FindOrCreateGameServerInterface" => {
+            Some(SteamInternal_FindOrCreateUserInterface as *const () as usize)
         }
         "SteamAPI_GetSteamInstallPath" => {
             Some(SteamAPI_GetSteamInstallPath as *const () as usize)
@@ -2904,5 +3013,17 @@ mod tests {
             .into_owned();
             assert_eq!(v2, "2.0");
         }
+    }
+
+    #[test]
+    fn test_map_locale_to_steam_language() {
+        assert_eq!(map_locale_to_steam_language("ru_RU.UTF-8"), b"russian\0");
+        assert_eq!(map_locale_to_steam_language("uk_UA.UTF-8"), b"ukrainian\0");
+        assert_eq!(map_locale_to_steam_language("de_DE.UTF-8"), b"german\0");
+        assert_eq!(map_locale_to_steam_language("pt_BR.UTF-8"), b"brazilian\0");
+        assert_eq!(map_locale_to_steam_language("zh_TW.UTF-8"), b"tchinese\0");
+        assert_eq!(map_locale_to_steam_language("zh_CN.UTF-8"), b"schinese\0");
+        assert_eq!(map_locale_to_steam_language("en_US.UTF-8"), b"english\0");
+        assert_eq!(map_locale_to_steam_language("C"), b"english\0");
     }
 }

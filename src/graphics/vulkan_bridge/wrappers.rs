@@ -1022,6 +1022,15 @@ pub unsafe extern "win64" fn guest_vkCreateSwapchainKHR(
             crate::graphics::dxgi_vulkan::set_vulkan_presentation_confirmed();
             return VK_SUCCESS;
         }
+        // Never silently fall back to a virtual (black) swapchain if real host presentation
+        // was already active or if the driver rejected the stale extent during window resize.
+        if crate::graphics::dxgi_vulkan::is_vulkan_presentation_confirmed()
+            || res == -1000001004 /* VK_ERROR_OUT_OF_DATE_KHR */
+            || res == -1000000001 /* VK_ERROR_NATIVE_WINDOW_IN_USE_KHR */
+            || res == -1000000000 /* VK_ERROR_SURFACE_LOST_KHR */
+        {
+            return res;
+        }
     }
 
     let v_swapchain =

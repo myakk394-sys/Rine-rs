@@ -75,6 +75,7 @@ fn spawn_emergency_watchdog(timeout_ms: u64) {
 
 /// Executes all registered host cleanup hooks in a strictly bounded and idempotent manner.
 pub fn perform_host_cleanup() {
+    spawn_emergency_watchdog(750);
     let prev = SHUTDOWN_STATE.compare_exchange(
         HostShutdownState::ShutdownRequested as u32,
         HostShutdownState::CleaningUp as u32,

@@ -474,6 +474,12 @@ pub struct RineNativeApp {
     pub launch_gif_frames: Vec<(egui::TextureHandle, Duration)>,
     pub launch_gif_total_duration: Duration,
     pub launch_start_time: Instant,
+    pub error_gif_frames: Vec<(egui::TextureHandle, Duration)>,
+    pub error_gif_total_duration: Duration,
+    pub error_anim_start: Instant,
+    pub launch_error_dialog: Option<(String, String)>,
+    pub low_ram_warning: Option<(String, f64, f64)>,
+    pub force_hybrid_launch: bool,
 }
 
 impl Default for RineNativeApp {
@@ -486,7 +492,7 @@ impl Default for RineNativeApp {
         let selected_path = selected_idx.map(|i| all_games[i].exe_path.clone());
 
         let init_logs = vec![
-            "[RINE CORE] Initializing Rine Win64 Translation Engine v0.2.0...".into(),
+            "[RINE CORE] Initializing Rine Win64 Translation Engine v0.3.0...".into(),
             format!("[HARDWARE] CPU: {} ({} threads)", hw.cpu_name, hw.cpu_threads),
             format!("[HARDWARE] GPU: {} (Driver: {})", hw.gpu_name, hw.gpu_driver),
             format!("[GAMES] Auto-discovered {} Steam & custom games.", all_games.len()),
@@ -496,7 +502,7 @@ impl Default for RineNativeApp {
         let console_logs = Arc::new(Mutex::new(vec![
             ConsoleLogEntry {
                 timestamp: current_time_formatted(),
-                text: "[RINE] Ядро трансляции Rine Win64 Engine v0.2.0 инициализировано.".into(),
+                text: "[RINE] Ядро трансляции Rine Win64 Engine v0.3.0 инициализировано.".into(),
                 level: ConsoleLogLevel::Info,
             },
             ConsoleLogEntry {
@@ -550,6 +556,12 @@ impl Default for RineNativeApp {
             launch_gif_frames: Vec::new(),
             launch_gif_total_duration: Duration::from_millis(100),
             launch_start_time: Instant::now(),
+            error_gif_frames: Vec::new(),
+            error_gif_total_duration: Duration::from_millis(100),
+            error_anim_start: Instant::now(),
+            launch_error_dialog: None,
+            low_ram_warning: None,
+            force_hybrid_launch: false,
         }
     }
 }
@@ -582,12 +594,13 @@ impl RineNativeApp {
     pub fn run() -> eframe::Result<()> {
         let mut viewport = egui::ViewportBuilder::default()
             .with_title("Rine Win64 Engine - Панель управления и лаунчер")
-            .with_app_id("rine")
+            .with_app_id("rine-gui")
             .with_inner_size([880.0, 680.0])
             .with_min_inner_size([640.0, 520.0])
             .with_decorations(false)
             .with_transparent(true)
-            .with_resizable(true);
+            .with_resizable(true)
+            .with_always_on_top();
         if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo.png")) {
             viewport = viewport.with_icon(std::sync::Arc::new(icon));
         }
@@ -618,48 +631,104 @@ impl RineNativeApp {
         }
     }
 
+    fn decode_gif_frames(
+        ctx: &egui::Context,
+        prefix: &str,
+        gif_bytes: &[u8],
+    ) -> Option<(Vec<(egui::TextureHandle, Duration)>, Duration)> {
+        use image::codecs::gif::GifDecoder;
+        use image::AnimationDecoder;
+
+        let cursor = std::io::Cursor::new(gif_bytes);
+        let decoder = GifDecoder::new(cursor).ok()?;
+        let raw_frames = decoder.into_frames().collect_frames().ok()?;
+        let mut frames = Vec::with_capacity(raw_frames.len());
+        let mut total = Duration::ZERO;
+        for (i, frame) in raw_frames.into_iter().enumerate() {
+            let (num, denom) = frame.delay().numer_denom_ms();
+            let delay_ms = if denom == 0 || num == 0 {
+                50
+            } else {
+                (num as u64) / (denom as u64)
+            };
+            let duration = Duration::from_millis(delay_ms.max(20));
+            total += duration;
+
+            let buffer = frame.into_buffer();
+            let width = buffer.width() as usize;
+            let height = buffer.height() as usize;
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [width, height],
+                buffer.as_raw(),
+            );
+            let tex = ctx.load_texture(
+                format!("{}_{}", prefix, i),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            );
+            frames.push((tex, duration));
+        }
+        if frames.is_empty() {
+            None
+        } else {
+            Some((frames, total))
+        }
+    }
+
     fn ensure_launch_gif(&mut self, ctx: &egui::Context) {
         if !self.launch_gif_frames.is_empty() {
             return;
         }
-        use image::codecs::gif::GifDecoder;
-        use image::AnimationDecoder;
+        if let Some((frames, total)) =
+            Self::decode_gif_frames(ctx, "rine_launch_gif", include_bytes!("../assets/Rine.gif"))
+        {
+            self.launch_gif_frames = frames;
+            self.launch_gif_total_duration = total;
+        }
+    }
 
-        let gif_bytes = include_bytes!("../assets/Rine.gif");
-        let cursor = std::io::Cursor::new(gif_bytes);
-        if let Ok(decoder) = GifDecoder::new(cursor) {
-            if let Ok(raw_frames) = decoder.into_frames().collect_frames() {
-                let mut frames = Vec::with_capacity(raw_frames.len());
-                let mut total = Duration::ZERO;
-                for (i, frame) in raw_frames.into_iter().enumerate() {
-                    let (num, denom) = frame.delay().numer_denom_ms();
-                    let delay_ms = if denom == 0 || num == 0 {
-                        50
-                    } else {
-                        (num as u64) / (denom as u64)
-                    };
-                    let duration = Duration::from_millis(delay_ms.max(20));
-                    total += duration;
+    fn ensure_error_gif(&mut self, ctx: &egui::Context) {
+        if !self.error_gif_frames.is_empty() {
+            return;
+        }
+        if let Some((frames, total)) = Self::decode_gif_frames(
+            ctx,
+            "rine_error_gif",
+            include_bytes!("../assets/Rine_error.gif"),
+        ) {
+            self.error_gif_frames = frames;
+            self.error_gif_total_duration = total;
+        }
+    }
 
-                    let buffer = frame.into_buffer();
-                    let width = buffer.width() as usize;
-                    let height = buffer.height() as usize;
-                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                        [width, height],
-                        buffer.as_raw(),
-                    );
-                    let tex = ctx.load_texture(
-                        format!("rine_launch_gif_{}", i),
-                        color_image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    frames.push((tex, duration));
-                }
-                if !frames.is_empty() {
-                    self.launch_gif_frames = frames;
-                    self.launch_gif_total_duration = total;
-                }
+    fn render_gif_animation(
+        ui: &mut egui::Ui,
+        frames: &[(egui::TextureHandle, Duration)],
+        total_dur: Duration,
+        started_at: Instant,
+        size: egui::Vec2,
+    ) {
+        if frames.is_empty() {
+            return;
+        }
+        let elapsed_ms = (started_at.elapsed().as_millis() % total_dur.as_millis().max(1)) as u64;
+        let mut acc = 0u64;
+        let mut chosen = 0;
+        for (i, (_, dur)) in frames.iter().enumerate() {
+            acc += dur.as_millis() as u64;
+            if elapsed_ms < acc {
+                chosen = i;
+                break;
             }
+        }
+        if let Some((tex, _)) = frames.get(chosen) {
+            let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+            ui.painter().image(
+                tex.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
         }
     }
 
@@ -751,6 +820,21 @@ impl RineNativeApp {
             path.file_name().unwrap_or_default().to_string_lossy().to_string()
         };
 
+        if self.config.ram_mode && !self.force_hybrid_launch {
+            let assessment = crate::mem::strategy::assess_memory_for_game(
+                &path,
+                crate::mem::strategy::StorageStrategy::RamOnly {
+                    lock_in_memory: self.config.lock_ram,
+                },
+            );
+            if assessment.insufficient_ram {
+                let avail_gb = assessment.available_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                let game_gb = assessment.game_size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                self.low_ram_warning = Some((game_name, avail_gb, game_gb));
+                return;
+            }
+        }
+
         self.launching_game_name = game_name.clone();
         self.running_game_name = Some(game_name);
         self.running_game_path = Some(path.clone());
@@ -816,7 +900,10 @@ impl RineNativeApp {
 
         let mut cmd = Command::new(rine_bin);
         cmd.arg(&exe_str);
-        if self.config.ram_mode {
+        if self.force_hybrid_launch {
+            self.force_hybrid_launch = false;
+            cmd.arg("--hybrid");
+        } else if self.config.ram_mode {
             cmd.arg("--ram-only");
             if self.config.lock_ram {
                 cmd.arg("--lock-ram");
@@ -847,6 +934,12 @@ impl RineNativeApp {
         if let Some(parent) = path.parent() {
             cmd.current_dir(parent);
             cmd.arg("-w").arg(parent.to_string_lossy().to_string());
+        }
+        if matches!(
+            steam_scanner::check_game_compatibility(&path).engine,
+            steam_scanner::GameEngine::UnrealEngine { .. }
+        ) {
+            cmd.arg("--").arg("-dx11");
         }
 
         cmd.stdout(std::process::Stdio::piped());
@@ -930,7 +1023,7 @@ impl RineNativeApp {
             }
             Err(e) => {
                 self.is_running.store(false, Ordering::SeqCst);
-                self.running_game_name = None;
+                let failed_name = self.running_game_name.take().unwrap_or_else(|| "Game".into());
                 self.running_game_path = None;
                 self.running_game_appid = None;
                 self.running_game_start = None;
@@ -942,6 +1035,9 @@ impl RineNativeApp {
                 self.logs.push(err_msg.clone());
                 self.add_console_log(ConsoleLogLevel::Error, err_msg.clone());
                 self.trigger_toast(&err_msg);
+                self.state = AppState::Dashboard;
+                self.error_anim_start = Instant::now();
+                self.launch_error_dialog = Some((failed_name, err_msg));
             }
         }
     }
@@ -962,6 +1058,8 @@ impl eframe::App for RineNativeApp {
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         let pid = child.id();
+                        let was_launching = self.state == AppState::LaunchingGame
+                            || !self.game_runtime_ready.load(Ordering::SeqCst);
                         self.is_running.store(false, Ordering::SeqCst);
                         self.game_runtime_ready.store(false, Ordering::SeqCst);
                         if self.state == AppState::LaunchingGame {
@@ -978,12 +1076,47 @@ impl eframe::App for RineNativeApp {
                             Language::En => format!("[RINE] Game '{}' (PID {}) terminated (exit code: {:?})", name, pid, status.code()),
                             Language::Ru => format!("[RINE] Игра '{}' (PID {}) завершилась (код: {:?})", name, pid, status.code()),
                         };
+                        let mut crash_details: Vec<String> = Vec::new();
                         if let Ok(mut logs) = self.console_logs.lock() {
+                            crash_details = logs
+                                .iter()
+                                .rev()
+                                .take(80)
+                                .filter(|entry| {
+                                    matches!(entry.level, ConsoleLogLevel::Error)
+                                        || entry.text.contains("SIGSEGV")
+                                        || entry.text.contains("GUEST CRASH")
+                                        || entry.text.contains("UNRESOLVED API FATAL")
+                                        || entry.text.contains("FATAL")
+                                        || entry.text.contains("Unimplemented")
+                                })
+                                .take(6)
+                                .map(|e| e.text.clone())
+                                .collect();
+                            crash_details.reverse();
                             logs.push(ConsoleLogEntry {
                                 timestamp: current_time_formatted(),
                                 text: msg.clone(),
                                 level: ConsoleLogLevel::Info,
                             });
+                        }
+                        if !status.success() || (was_launching && status.code() != Some(0)) {
+                            let reason = if !crash_details.is_empty() {
+                                format!("{}\n{}", msg, crash_details.join("\n"))
+                            } else {
+                                match self.config.lang {
+                                    Language::En => format!(
+                                        "{}\nThe process exited before completing startup (code: {:?}). Check console logs for details.",
+                                        msg, status.code()
+                                    ),
+                                    Language::Ru => format!(
+                                        "{}\nПроцесс завершился с ошибкой до запуска (код: {:?}). Подробности в консоли.",
+                                        msg, status.code()
+                                    ),
+                                }
+                            };
+                            self.error_anim_start = Instant::now();
+                            self.launch_error_dialog = Some((name.clone(), reason));
                         }
                         self.trigger_toast(&msg);
                         *proc_opt = None;
@@ -1026,6 +1159,140 @@ impl eframe::App for RineNativeApp {
         }
 
         self.render_toast_overlay(ctx);
+
+        if let Some((game_name, avail_gb, game_gb)) = self.low_ram_warning.clone() {
+            self.ensure_error_gif(ctx);
+            let mut open = true;
+            let title = match self.config.lang {
+                Language::En => "Insufficient RAM Warning",
+                Language::Ru => "Предупреждение: нехватка ОЗУ",
+            };
+            egui::Window::new(title)
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_max_width(460.0);
+                    ui.vertical_centered(|ui| {
+                        Self::render_gif_animation(
+                            ui,
+                            &self.error_gif_frames,
+                            self.error_gif_total_duration,
+                            self.error_anim_start,
+                            egui::vec2(288.0, 162.0),
+                        );
+                    });
+                    ui.add_space(8.0);
+                    match self.config.lang {
+                        Language::En => {
+                            ui.label(format!(
+                                "Game '{}' uses {:.1} GB on disk, while only {:.1} GB RAM is available (less than 3 GB system headroom).",
+                                game_name, game_gb, avail_gb
+                            ));
+                            ui.add_space(6.0);
+                            ui.label("Switch to Hybrid mode (critical PE in RAM, assets streamed from disk)?");
+                        }
+                        Language::Ru => {
+                            ui.label(format!(
+                                "Игра '{}' весит {:.1} ГБ, а свободно только {:.1} ГБ ОЗУ (останется меньше 3 ГБ для системы).",
+                                game_name, game_gb, avail_gb
+                            ));
+                            ui.add_space(6.0);
+                            ui.label("Переключиться в гибридный режим (важное в ОЗУ, ассеты с диска)?");
+                        }
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok_text = match self.config.lang {
+                            Language::En => "Launch in Hybrid Mode",
+                            Language::Ru => "Запустить в гибридном режиме",
+                        };
+                        let cancel_text = match self.config.lang {
+                            Language::En => "Cancel",
+                            Language::Ru => "Отмена",
+                        };
+                        if ui.button(ok_text).clicked() {
+                            self.low_ram_warning = None;
+                            self.force_hybrid_launch = true;
+                            self.start_game_launch();
+                        }
+                        if ui.button(cancel_text).clicked() {
+                            self.low_ram_warning = None;
+                        }
+                    });
+                });
+            if !open {
+                self.low_ram_warning = None;
+            }
+        }
+
+        if let Some((game_name, error_reason)) = self.launch_error_dialog.clone() {
+            self.ensure_error_gif(ctx);
+            let mut open = true;
+            let title = match self.config.lang {
+                Language::En => "Game Launch Error",
+                Language::Ru => "Ошибка запуска игры",
+            };
+            egui::Window::new(title)
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_max_width(500.0);
+                    ui.vertical_centered(|ui| {
+                        Self::render_gif_animation(
+                            ui,
+                            &self.error_gif_frames,
+                            self.error_gif_total_duration,
+                            self.error_anim_start,
+                            egui::vec2(320.0, 180.0),
+                        );
+                    });
+                    ui.add_space(8.0);
+                    let header = match self.config.lang {
+                        Language::En => format!("Failed to run '{}':", game_name),
+                        Language::Ru => format!("Не удалось запустить '{}':", game_name),
+                    };
+                    ui.colored_label(egui::Color32::from_rgb(255, 110, 110), header);
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(130.0)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&error_reason)
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(235, 220, 220)),
+                                )
+                                .wrap(true),
+                            );
+                        });
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let open_console = match self.config.lang {
+                            Language::En => "Open Console",
+                            Language::Ru => "Открыть консоль",
+                        };
+                        let close_text = match self.config.lang {
+                            Language::En => "Close",
+                            Language::Ru => "Закрыть",
+                        };
+                        if ui.button(open_console).clicked() {
+                            self.tab = GuiTab::Console;
+                            self.launch_error_dialog = None;
+                        }
+                        if ui.button(close_text).clicked() {
+                            self.launch_error_dialog = None;
+                        }
+                    });
+                });
+            if !open {
+                self.launch_error_dialog = None;
+            }
+        }
     }
 }
 
@@ -1045,7 +1312,7 @@ impl RineNativeApp {
                     .color(egui::Color32::from_rgb(255, 102, 0)),
             );
             ui.label(
-                egui::RichText::new("v0.2.0")
+                egui::RichText::new("v0.3.0")
                     .monospace()
                     .size(10.0)
                     .color(egui::Color32::from_rgb(150, 150, 160)),
@@ -1486,7 +1753,7 @@ impl RineNativeApp {
                                             steam_scanner::GameEngine::Source => ("[Source]", egui::Color32::from_rgb(100, 220, 120)),
                                             steam_scanner::GameEngine::GameMaker => ("[GameMaker]", egui::Color32::from_rgb(80, 200, 120)),
                                             steam_scanner::GameEngine::RenPy => ("[Ren'Py]", egui::Color32::from_rgb(100, 200, 100)),
-                                            steam_scanner::GameEngine::UnrealEngine { .. } => ("[UE4/5 ⛔]", egui::Color32::from_rgb(255, 80, 80)),
+                                            steam_scanner::GameEngine::UnrealEngine { .. } => ("[UE4]", egui::Color32::from_rgb(70, 200, 130)),
                                             steam_scanner::GameEngine::CustomNative => ("[Win64]", egui::Color32::from_rgb(170, 150, 250)),
                                             steam_scanner::GameEngine::Unknown => {
                                                 if compat.status == steam_scanner::CompatibilityStatus::LinuxNative {

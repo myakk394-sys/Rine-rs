@@ -126,7 +126,9 @@ pub fn save_registry_store(map: &HashMap<String, RegValue>) {
                 let tmp_path = path.with_extension("tmp");
                 if std::fs::write(&tmp_path, json.as_bytes()).is_ok() {
                     let _ = std::fs::rename(&tmp_path, &path);
-                    println!("[ADVAPI32] Persisted registry store ({} keys) to {:?}", map.len(), path);
+                    if std::env::var_os("RINE_VERBOSE_REG").is_some() {
+                        println!("[ADVAPI32] Persisted registry store ({} keys) to {:?}", map.len(), path);
+                    }
                 } else {
                     eprintln!("[ADVAPI32] Failed to write tmp registry file at {:?}", tmp_path);
                 }
@@ -292,6 +294,7 @@ pub unsafe extern "win64" fn RegOpenKeyExW(
     hpaths.get_or_insert_with(HashMap::new).insert(handle, combined);
     0 // ERROR_SUCCESS
 }
+
 
 pub unsafe extern "win64" fn RegOpenKeyExA(
     hkey: u64,
@@ -919,6 +922,7 @@ pub unsafe extern "win64" fn RegNotifyChangeKeyValue(
     0 // ERROR_SUCCESS
 }
 
+
 pub unsafe extern "win64" fn RegQueryInfoKeyW(
     hkey: u64,
     _lp_class: *mut u16,
@@ -1128,6 +1132,50 @@ pub unsafe extern "win64" fn OpenProcessToken(
     1 // TRUE
 }
 
+#[no_mangle]
+pub unsafe extern "win64" fn GetSecurityInfo(
+    _handle: usize,
+    _object_type: u32,
+    _security_info: u32,
+    ppsid_owner: *mut usize,
+    ppsid_group: *mut usize,
+    pp_dacl: *mut usize,
+    pp_sacl: *mut usize,
+    pp_security_descriptor: *mut usize,
+) -> u32 {
+    if !ppsid_owner.is_null() {
+        *ppsid_owner = 0;
+    }
+    if !ppsid_group.is_null() {
+        *ppsid_group = 0;
+    }
+    if !pp_dacl.is_null() {
+        *pp_dacl = 0;
+    }
+    if !pp_sacl.is_null() {
+        *pp_sacl = 0;
+    }
+    if !pp_security_descriptor.is_null() {
+        *pp_security_descriptor = 0;
+    }
+    0 // ERROR_SUCCESS
+}
+
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetSecurityInfo(
+    _handle: usize,
+    _object_type: u32,
+    _security_info: u32,
+    _psid_owner: usize,
+    _psid_group: usize,
+    _p_dacl: usize,
+    _p_sacl: usize,
+) -> u32 {
+    0 // ERROR_SUCCESS
+}
+
+
 pub unsafe extern "win64" fn GetSidSubAuthority(_sid: usize, _sub_authority: u32) -> *mut u32 {
     static mut SUB_AUTH: u32 = 1000;
     unsafe { &raw mut SUB_AUTH }
@@ -1171,6 +1219,7 @@ pub unsafe extern "win64" fn EventSetInformation(
 ) -> u32 {
     0 // ERROR_SUCCESS
 }
+
 
 pub unsafe extern "win64" fn AllocateLocallyUniqueId(luid: *mut u64) -> i32 {
     static NEXT_LUID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
@@ -1400,9 +1449,11 @@ pub unsafe extern "win64" fn EventRegister(
     0 // ERROR_SUCCESS
 }
 
+
 pub unsafe extern "win64" fn EventUnregister(_reg_handle: u64) -> u32 {
     0 // ERROR_SUCCESS
 }
+
 
 pub unsafe extern "win64" fn EventWriteTransfer(
     _reg_handle: u64,
@@ -1413,6 +1464,97 @@ pub unsafe extern "win64" fn EventWriteTransfer(
     _user_data: *const std::ffi::c_void,
 ) -> u32 {
     0 // ERROR_SUCCESS
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetUserNameW(lp_buffer: *mut u16, pcb_buffer: *mut u32) -> i32 {
+    if pcb_buffer.is_null() {
+        return 0;
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let utf16: Vec<u16> = user.encode_utf16().chain(std::iter::once(0)).collect();
+    let needed = utf16.len() as u32;
+    if lp_buffer.is_null() || *pcb_buffer < needed {
+        *pcb_buffer = needed;
+        crate::dlls::kernel32::SetLastError(122); // ERROR_INSUFFICIENT_BUFFER
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(utf16.as_ptr(), lp_buffer, utf16.len());
+    *pcb_buffer = needed;
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetUserNameA(lp_buffer: *mut u8, pcb_buffer: *mut u32) -> i32 {
+    if pcb_buffer.is_null() {
+        return 0;
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let bytes = user.as_bytes();
+    let needed = (bytes.len() + 1) as u32;
+    if lp_buffer.is_null() || *pcb_buffer < needed {
+        *pcb_buffer = needed;
+        crate::dlls::kernel32::SetLastError(122);
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_buffer, bytes.len());
+    *lp_buffer.add(bytes.len()) = 0;
+    *pcb_buffer = needed;
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn LookupPrivilegeValueA(
+    _lp_system_name: *const u8,
+    _lp_name: *const u8,
+    lp_luid: *mut u64,
+) -> i32 {
+    if !lp_luid.is_null() {
+        *lp_luid = 1;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn RegisterEventSourceW(
+    _lp_unc_server_name: *const u16,
+    _lp_source_name: *const u16,
+) -> usize {
+    0x7001
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn ReportEventW(
+    _h_event_log: usize,
+    _w_type: u16,
+    _w_category: u16,
+    _dw_event_id: u32,
+    _lp_user_sid: usize,
+    _w_num_strings: u16,
+    _dw_data_size: u32,
+    _lp_strings: *const *const u16,
+    _lp_raw_data: *const u8,
+) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn DeregisterEventSource(_h_event_log: usize) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn RegEnumKeyExW(
+    _hkey: u64,
+    _dw_index: u32,
+    _lp_name: *mut u16,
+    _lpcch_name: *mut u32,
+    _lp_reserved: *mut u32,
+    _lp_class: *mut u16,
+    _lpcch_class: *mut u32,
+    _lpft_last_write_time: *mut u8,
+) -> u32 {
+    259 // ERROR_NO_MORE_ITEMS
 }
 
 #[cfg(test)]

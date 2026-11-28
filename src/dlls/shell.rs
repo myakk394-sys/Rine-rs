@@ -9,6 +9,14 @@ pub unsafe extern "win64" fn CoInitializeEx(_pv_reserved: u64, _dw_co_init: u32)
 pub unsafe extern "win64" fn CoUninitialize() {}
 
 #[no_mangle]
+pub unsafe extern "win64" fn OleInitialize(_pv_reserved: u64) -> HRESULT {
+    0 // S_OK
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn OleUninitialize() {}
+
+#[no_mangle]
 pub unsafe extern "win64" fn RoInitialize(_init_type: u32) -> HRESULT {
     0 // S_OK
 }
@@ -388,6 +396,173 @@ pub unsafe extern "win64" fn SymCleanup(_h_process: u64) -> i32 {
 }
 
 #[no_mangle]
+pub unsafe extern "win64" fn SymInitializeW(
+    _h_process: u64,
+    _user_search_path: usize,
+    _f_invade_process: i32,
+) -> i32 {
+    1
+}
+
+static SYM_OPTIONS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymSetOptions(sym_options: u32) -> u32 {
+    SYM_OPTIONS.swap(sym_options, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymGetOptions() -> u32 {
+    SYM_OPTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymFromAddrW(
+    _h_process: u64,
+    _address: u64,
+    displacement: *mut u64,
+    _symbol: *mut libc::c_void,
+) -> i32 {
+    if !displacement.is_null() {
+        *displacement = 0;
+    }
+    0 // FALSE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymGetLineFromAddr64(
+    _h_process: u64,
+    _qw_addr: u64,
+    pdw_displacement: *mut u32,
+    _line: *mut libc::c_void,
+) -> i32 {
+    if !pdw_displacement.is_null() {
+        *pdw_displacement = 0;
+    }
+    0 // FALSE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymGetLineFromAddrW64(
+    _h_process: u64,
+    _qw_addr: u64,
+    pdw_displacement: *mut u32,
+    _line: *mut libc::c_void,
+) -> i32 {
+    if !pdw_displacement.is_null() {
+        *pdw_displacement = 0;
+    }
+    0 // FALSE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymGetModuleInfo64(
+    _h_process: u64,
+    _qw_addr: u64,
+    _module_info: *mut libc::c_void,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymGetModuleInfoW64(
+    _h_process: u64,
+    _qw_addr: u64,
+    _module_info: *mut libc::c_void,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymLoadModuleEx(
+    _h_process: u64,
+    _h_file: u64,
+    _image_name: *const i8,
+    _module_name: *const i8,
+    base_of_dll: u64,
+    _dll_size: u32,
+    _data: *mut libc::c_void,
+    _flags: u32,
+) -> u64 {
+    base_of_dll
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymLoadModuleExW(
+    _h_process: u64,
+    _h_file: u64,
+    _image_name: *const u16,
+    _module_name: *const u16,
+    base_of_dll: u64,
+    _dll_size: u32,
+    _data: *mut libc::c_void,
+    _flags: u32,
+) -> u64 {
+    base_of_dll
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn StackWalk64(
+    _machine_type: u32,
+    _h_process: u64,
+    _h_thread: u64,
+    _stack_frame: *mut libc::c_void,
+    _context_record: *mut libc::c_void,
+    _read_memory_routine: usize,
+    _function_table_access_routine: usize,
+    _get_module_base_routine: usize,
+    _translate_address: usize,
+) -> i32 {
+    0 // FALSE (end of stack walk)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymFunctionTableAccess64(
+    _h_process: u64,
+    _addr_base: u64,
+) -> *mut libc::c_void {
+    std::ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymGetModuleBase64(_h_process: u64, _qw_addr: u64) -> u64 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymGetSearchPathW(
+    _h_process: u64,
+    search_path: *mut u16,
+    search_path_length: u32,
+) -> i32 {
+    if !search_path.is_null() && search_path_length > 0 {
+        *search_path = 0;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SymSetSearchPathW(
+    _h_process: u64,
+    _search_path: *const u16,
+) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn MiniDumpWriteDump(
+    _h_process: u64,
+    _process_id: u32,
+    _h_file: u64,
+    _dump_type: u32,
+    _exception_param: *mut libc::c_void,
+    _user_stream_param: *mut libc::c_void,
+    _callback_param: *mut libc::c_void,
+) -> i32 {
+    1
+}
+
+#[no_mangle]
 pub unsafe extern "win64" fn SysAllocString(psz: *const u16) -> *mut u16 {
     if psz.is_null() {
         return std::ptr::null_mut();
@@ -577,6 +752,94 @@ pub unsafe extern "win64" fn VariantInit(pvar: *mut u8) {
     if !pvar.is_null() {
         std::ptr::write_bytes(pvar, 0, 24);
     }
+}
+
+pub unsafe extern "win64" fn IIDFromString(
+    lpsz: *const u16,
+    lpiid: *mut Guid,
+) -> i32 {
+    if lpiid.is_null() {
+        return -2147024809; // E_INVALIDARG
+    }
+    if lpsz.is_null() {
+        std::ptr::write_bytes(lpiid, 0, 1);
+        return 0;
+    }
+    let mut s = String::new();
+    let mut i = 0;
+    while *lpsz.add(i) != 0 && i < 64 {
+        if let Some(c) = char::from_u32(*lpsz.add(i) as u32) {
+            if c.is_ascii_hexdigit() {
+                s.push(c);
+            }
+        }
+        i += 1;
+    }
+    if s.len() != 32 {
+        return -2147221005; // CO_E_IIDSTRING
+    }
+    let d1 = u32::from_str_radix(&s[0..8], 16).unwrap_or(0);
+    let d2 = u16::from_str_radix(&s[8..12], 16).unwrap_or(0);
+    let d3 = u16::from_str_radix(&s[12..16], 16).unwrap_or(0);
+    let mut d4 = [0u8; 8];
+    for j in 0..8 {
+        d4[j] = u8::from_str_radix(&s[16 + j * 2..18 + j * 2], 16).unwrap_or(0);
+    }
+    *lpiid = Guid {
+        data1: d1,
+        data2: d2,
+        data3: d3,
+        data4: d4,
+    };
+    0 // S_OK
+}
+
+pub unsafe extern "win64" fn CLSIDFromString(
+    lpsz: *const u16,
+    pclsid: *mut Guid,
+) -> i32 {
+    IIDFromString(lpsz, pclsid)
+}
+
+pub unsafe extern "win64" fn PropVariantCopy(
+    pvar_dest: *mut u8,
+    pvar_src: *const u8,
+) -> i32 {
+    if pvar_dest.is_null() || pvar_src.is_null() {
+        return -2147024809;
+    }
+    std::ptr::copy_nonoverlapping(pvar_src, pvar_dest, 24);
+    0
+}
+
+pub unsafe extern "win64" fn RegisterDragDrop(
+    _hwnd: usize,
+    _p_drop_target: *mut libc::c_void,
+) -> i32 {
+    0 // S_OK
+}
+
+pub unsafe extern "win64" fn RevokeDragDrop(_hwnd: usize) -> i32 {
+    0 // S_OK
+}
+
+pub unsafe extern "win64" fn ReleaseStgMedium(_p_medium: *mut u8) {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn VariantClear(pvar: *mut u8) -> HRESULT {
+    if pvar.is_null() {
+        return 0x80070057u32 as i32; // E_INVALIDARG
+    }
+    let vt = *(pvar as *const u16);
+    if vt == 8 {
+        // VT_BSTR
+        let bstr = *(pvar.add(8) as *const *mut u16);
+        if !bstr.is_null() {
+            SysFreeString(bstr);
+        }
+    }
+    std::ptr::write_bytes(pvar, 0, 24);
+    0 // S_OK
 }
 
 pub unsafe extern "win64" fn ShellExecuteW(

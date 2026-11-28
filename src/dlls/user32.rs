@@ -495,6 +495,7 @@ pub fn is_primary_window(hwnd: u64) -> bool {
 pub static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
 pub static WINDOW_ACTIVATED: AtomicBool = AtomicBool::new(false);
 pub static IS_CURSOR_CLIPPED: AtomicBool = AtomicBool::new(false);
+pub static IS_RELATIVE_MOUSE_CLIP: AtomicBool = AtomicBool::new(false);
 pub static LAST_CURSOR_X: AtomicI32 = AtomicI32::new(960);
 pub static LAST_CURSOR_Y: AtomicI32 = AtomicI32::new(540);
 pub static CACHED_WIN_X: AtomicI32 = AtomicI32::new(0);
@@ -887,10 +888,14 @@ pub unsafe extern "win64" fn CreateWindowExW_System(
             WINDOW_VISIBLE.store(true, Ordering::SeqCst);
         }
         let sdl_win = crate::windowing::x11::get_global_sdl_window() as usize;
+        let (actual_w, actual_h) = crate::windowing::x11::sdl_get_window_size();
+        let eff_w = if actual_w > 320 { actual_w as u32 } else { eff_w };
+        let eff_h = if actual_h > 240 { actual_h as u32 } else { eff_h };
+        let (actual_x, actual_y) = refresh_cached_window_position();
         register_hwnd(existing, sdl_win, eff_w, eff_h);
         println!(
-            "[USER32 ENGINE] Bound primary window title='{}' to physical HWND=0x{:X}, size={}x{} (requested {}x{}), wndproc=0x{:016X}",
-            title, existing, eff_w, eff_h, width, height, wndproc
+            "[USER32 ENGINE] Bound primary window title='{}' to physical HWND=0x{:X}, size={}x{} (requested {}x{}), pos=({},{}), wndproc=0x{:016X}",
+            title, existing, eff_w, eff_h, width, height, actual_x, actual_y, wndproc
         );
         let mut cs = CreateStructW {
             lp_create_params: _lp_param,
@@ -899,8 +904,8 @@ pub unsafe extern "win64" fn CreateWindowExW_System(
             hwnd_parent: _h_wnd_parent,
             cy: eff_h as i32,
             cx: eff_w as i32,
-            y: if _y >= 0 && _y <= 5000 { _y } else { 0 },
-            x: if _x >= 0 && _x <= 5000 { _x } else { 0 },
+            y: actual_y,
+            x: actual_x,
             style: _dw_style as i32,
             lpsz_name: lp_window_name,
             lpsz_class: lp_class_name,
@@ -911,7 +916,19 @@ pub unsafe extern "win64" fn CreateWindowExW_System(
         SendMessageW(existing, 0x0081 /* WM_NCCREATE */, 0, cs_ptr);
         SendMessageW(existing, 0x0083 /* WM_NCCALCSIZE */, 0, 0);
         SendMessageW(existing, 0x0001 /* WM_CREATE */, 0, cs_ptr);
+        SendMessageW(existing, 0x0003 /* WM_MOVE */, 0, ((actual_y as u64 & 0xFFFF) << 16) | (actual_x as u64 & 0xFFFF));
         SendMessageW(existing, 0x0005 /* WM_SIZE */, 0 /* SIZE_RESTORED */, ((eff_h as u64) << 16) | (eff_w as u64));
+        let mut winpos = WindowPos {
+            hwnd: existing,
+            hwnd_insert_after: 0,
+            x: actual_x,
+            y: actual_y,
+            cx: eff_w as i32,
+            cy: eff_h as i32,
+            flags: 0x0014, // SWP_NOZORDER | SWP_NOACTIVATE
+            _pad: 0,
+        };
+        SendMessageW(existing, 0x0047 /* WM_WINDOWPOSCHANGED */, 0, &mut winpos as *mut WindowPos as u64);
         SendMessageW(existing, 0x0006 /* WM_ACTIVATE */, 1 /* WA_ACTIVE */, 0);
         SendMessageW(existing, 0x0007 /* WM_SETFOCUS */, 0, 0);
         return existing;
@@ -2131,7 +2148,7 @@ fn poll_and_enqueue_sdl_event(sdl_event: &[u8; 56]) {
                 0x0C => {
                     // SDL_WINDOWEVENT_FOCUS_GAINED
                     WINDOW_ACTIVATED.store(true, Ordering::Relaxed);
-                    if IS_CURSOR_CLIPPED.load(Ordering::Relaxed) {
+                    if IS_RELATIVE_MOUSE_CLIP.load(Ordering::Relaxed) {
                         if let Some(f) = get_sdl_set_relative_mouse_mode_fn() {
                             unsafe { f(1); }
                         }
@@ -2166,13 +2183,10 @@ fn poll_and_enqueue_sdl_event(sdl_event: &[u8; 56]) {
                 }
                 0x0D => {
                     // SDL_WINDOWEVENT_FOCUS_LOST
-                    // Under Linux compositors (e.g. Hyprland/Wayland), focus can flutter.
-                    // We update WINDOW_ACTIVATED so subsequent mouse interaction immediately restores focus,
-                    // but we DO NOT send WM_ACTIVATE(WA_INACTIVE) to avoid freezing Unity's mouse pipeline.
+                    // Under Linux compositors (e.g. Hyprland/Wayland), pointer grabs and focus can flutter.
+                    // Do NOT disable relative mouse mode here while cursor is clipped, otherwise
+                    // SDL_SetRelativeMouseMode(1) immediately cancels itself on X11 NotifyGrab FocusOut.
                     WINDOW_ACTIVATED.store(false, Ordering::Relaxed);
-                    if let Some(f) = get_sdl_set_relative_mouse_mode_fn() {
-                        unsafe { f(0); }
-                    }
                 }
                 0x0E => {
                     // SDL_WINDOWEVENT_CLOSE
@@ -3882,16 +3896,37 @@ pub unsafe extern "win64" fn _TrackMouseEvent(lp_event_track: *const TrackMouseE
 pub unsafe extern "win64" fn ClipCursor(lp_rect: *const Rect) -> i32 {
     let is_clip = !lp_rect.is_null();
     IS_CURSOR_CLIPPED.store(is_clip, Ordering::Relaxed);
+    let sdl_win = crate::windowing::x11::get_global_sdl_window();
+    let sdl_handle = crate::windowing::x11::get_sdl_handle();
+    if !sdl_win.is_null() && !sdl_handle.is_null() {
+        type SdlSetWindowGrabFn = unsafe extern "C" fn(*mut std::ffi::c_void, i32);
+        if let Ok(sym) = std::ffi::CString::new("SDL_SetWindowGrab") {
+            let p = libc::dlsym(sdl_handle, sym.as_ptr());
+            if !p.is_null() {
+                let grab_fn: SdlSetWindowGrabFn = std::mem::transmute(p);
+                grab_fn(sdl_win, if is_clip { 1 } else { 0 });
+            }
+        }
+    }
     if is_clip {
         let r = *lp_rect;
         println!(
             "[USER32] ClipCursor(is_clip=true, rect=[{}, {}, {}, {}]) -> TRUE",
             r.left, r.top, r.right, r.bottom
         );
-        if let Some(f) = get_sdl_set_relative_mouse_mode_fn() {
-            f(1);
+        // Only enable SDL relative mouse mode if clipping to a tiny 1x1/2x2 point (FPS lock);
+        // full-window or [0,0,0,0] ClipCursor in UE4 menus must keep absolute cursor coordinates working!
+        let w = r.right - r.left;
+        let h = r.bottom - r.top;
+        let is_rel = w > 0 && w <= 2 && h > 0 && h <= 2;
+        IS_RELATIVE_MOUSE_CLIP.store(is_rel, Ordering::Relaxed);
+        if is_rel {
+            if let Some(f) = get_sdl_set_relative_mouse_mode_fn() {
+                f(1);
+            }
         }
     } else {
+        IS_RELATIVE_MOUSE_CLIP.store(false, Ordering::Relaxed);
         println!("[USER32] ClipCursor(is_clip=false) -> TRUE");
         if let Some(f) = get_sdl_set_relative_mouse_mode_fn() {
             f(0);
@@ -3925,30 +3960,39 @@ pub struct Rect {
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn GetClientRect(hwnd: usize, lp_rect: *mut Rect) -> i32 {
-    let (w, h) = if is_primary_window(hwnd as u64) {
+fn resolve_window_size(hwnd: usize) -> (i32, i32) {
+    if is_primary_window(hwnd as u64) {
+        let has_sdl_win = !crate::windowing::x11::get_global_sdl_window().is_null();
         let (real_w, real_h) = crate::windowing::x11::sdl_get_window_size();
-        let fallback_w = if real_w > 0 { real_w } else { 1920 };
-        let fallback_h = if real_h > 0 { real_h } else { 1080 };
+        if has_sdl_win && real_w > 320 && real_h > 240 {
+            return (real_w, real_h);
+        }
         if let Some(win) =
             crate::graphics::vulkan_bridge::handles::WindowRegistry::global().lookup(hwnd)
         {
             let reg_w = win.width as i32;
             let reg_h = win.height as i32;
-            (
-                if reg_w > 320 { reg_w } else { fallback_w },
-                if reg_h > 240 { reg_h } else { fallback_h },
-            )
-        } else {
-            (fallback_w, fallback_h)
+            return (
+                if reg_w > 320 { reg_w } else if real_w > 0 { real_w } else { 1920 },
+                if reg_h > 240 { reg_h } else if real_h > 0 { real_h } else { 1080 },
+            );
         }
+        (
+            if real_w > 0 { real_w } else { 1920 },
+            if real_h > 0 { real_h } else { 1080 },
+        )
     } else if let Some(win) =
         crate::graphics::vulkan_bridge::handles::WindowRegistry::global().lookup(hwnd)
     {
         (win.width as i32, win.height as i32)
     } else {
         (1, 1)
-    };
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetClientRect(hwnd: usize, lp_rect: *mut Rect) -> i32 {
+    let (w, h) = resolve_window_size(hwnd);
     if !lp_rect.is_null() {
         *lp_rect = Rect {
             left: 0,
@@ -3972,29 +4016,7 @@ pub unsafe extern "win64" fn GetWindowRect(hwnd: usize, lp_rect: *mut Rect) -> i
     } else {
         (0, 0)
     };
-    let (w, h) = if is_pri {
-        let (real_w, real_h) = crate::windowing::x11::sdl_get_window_size();
-        let fallback_w = if real_w > 0 { real_w } else { 1920 };
-        let fallback_h = if real_h > 0 { real_h } else { 1080 };
-        if let Some(win) =
-            crate::graphics::vulkan_bridge::handles::WindowRegistry::global().lookup(hwnd)
-        {
-            let reg_w = win.width as i32;
-            let reg_h = win.height as i32;
-            (
-                if reg_w > 320 { reg_w } else { fallback_w },
-                if reg_h > 240 { reg_h } else { fallback_h },
-            )
-        } else {
-            (fallback_w, fallback_h)
-        }
-    } else if let Some(win) =
-        crate::graphics::vulkan_bridge::handles::WindowRegistry::global().lookup(hwnd)
-    {
-        (win.width as i32, win.height as i32)
-    } else {
-        (1, 1)
-    };
+    let (w, h) = resolve_window_size(hwnd);
     if !lp_rect.is_null() {
         *lp_rect = Rect {
             left: x,
@@ -4145,17 +4167,26 @@ pub unsafe extern "win64" fn SetWindowPos(
         (cx, cy)
     };
     let final_w = if is_pri {
-        if (flags & 0x0001) == 0 && cx > 320 { cx } else if real_w > 0 { real_w } else { 1920 }
+        if real_w > 320 { real_w } else if (flags & 0x0001) == 0 && cx > 320 { cx } else { 1920 }
     } else {
         if (flags & 0x0001) == 0 && cx > 0 { cx } else if real_w > 0 { real_w } else { cx }
     };
     let final_h = if is_pri {
-        if (flags & 0x0001) == 0 && cy > 240 { cy } else if real_h > 0 { real_h } else { 1080 }
+        if real_h > 240 { real_h } else if (flags & 0x0001) == 0 && cy > 240 { cy } else { 1080 }
     } else {
         if (flags & 0x0001) == 0 && cy > 0 { cy } else if real_h > 0 { real_h } else { cy }
     };
+    if is_pri && final_w > 320 && final_h > 240 {
+        crate::graphics::vulkan_bridge::handles::WindowRegistry::global()
+            .update_window_size(hwnd, final_w as u32, final_h as u32);
+    }
+    let (actual_x, actual_y) = if is_pri {
+        refresh_cached_window_position()
+    } else {
+        (x, y)
+    };
     if (flags & 0x0002) == 0 {
-        SendMessageW(hwnd as u64, 0x0003 /* WM_MOVE */, 0, ((y as u64 & 0xFFFF) << 16) | (x as u64 & 0xFFFF));
+        SendMessageW(hwnd as u64, 0x0003 /* WM_MOVE */, 0, ((actual_y as u64 & 0xFFFF) << 16) | (actual_x as u64 & 0xFFFF));
     }
     if (flags & 0x0001) == 0 {
         SendMessageW(hwnd as u64, 0x0005 /* WM_SIZE */, 0 /* SIZE_RESTORED */, ((final_h as u64 & 0xFFFF) << 16) | (final_w as u64 & 0xFFFF));
@@ -4163,8 +4194,8 @@ pub unsafe extern "win64" fn SetWindowPos(
     let mut winpos = WindowPos {
         hwnd: hwnd as u64,
         hwnd_insert_after: _hwnd_insert_after as u64,
-        x,
-        y,
+        x: actual_x,
+        y: actual_y,
         cx: final_w,
         cy: final_h,
         flags,
@@ -4201,49 +4232,7 @@ pub unsafe extern "win64" fn MoveWindow(
         "[USER32] MoveWindow(hWnd=0x{:X}, x={}, y={}, w={}, h={}) -> TRUE",
         hwnd, x, y, n_width, n_height
     );
-    let is_pri = is_primary_window(hwnd as u64);
-    if is_pri {
-        if x >= -5000 && x <= 5000 && y >= -5000 && y <= 5000 {
-            crate::windowing::x11::sdl_set_window_position(x, y);
-        }
-        if n_width > 320 && n_height > 240 {
-            crate::graphics::vulkan_bridge::handles::WindowRegistry::global()
-                .update_window_size(hwnd, n_width as u32, n_height as u32);
-            crate::windowing::x11::sdl_set_window_size(n_width, n_height);
-        }
-    } else if n_width > 0 && n_height > 0 {
-        crate::graphics::vulkan_bridge::handles::WindowRegistry::global()
-            .update_window_size(hwnd, n_width as u32, n_height as u32);
-    }
-    let (real_w, real_h) = if is_pri {
-        crate::windowing::x11::sdl_get_window_size()
-    } else {
-        (n_width, n_height)
-    };
-    let final_w = if is_pri {
-        if n_width > 320 { n_width } else if real_w > 0 { real_w } else { 1920 }
-    } else {
-        if n_width > 0 { n_width } else if real_w > 0 { real_w } else { n_width }
-    };
-    let final_h = if is_pri {
-        if n_height > 240 { n_height } else if real_h > 0 { real_h } else { 1080 }
-    } else {
-        if n_height > 0 { n_height } else if real_h > 0 { real_h } else { n_height }
-    };
-    SendMessageW(hwnd as u64, 0x0003 /* WM_MOVE */, 0, ((y as u64 & 0xFFFF) << 16) | (x as u64 & 0xFFFF));
-    SendMessageW(hwnd as u64, 0x0005 /* WM_SIZE */, 0 /* SIZE_RESTORED */, ((final_h as u64 & 0xFFFF) << 16) | (final_w as u64 & 0xFFFF));
-    let mut winpos = WindowPos {
-        hwnd: hwnd as u64,
-        hwnd_insert_after: 0,
-        x,
-        y,
-        cx: final_w,
-        cy: final_h,
-        flags: 0x0014, // SWP_NOZORDER | SWP_NOACTIVATE
-        _pad: 0,
-    };
-    SendMessageW(hwnd as u64, 0x0047 /* WM_WINDOWPOSCHANGED */, 0, &mut winpos as *mut WindowPos as u64);
-    1 // TRUE
+    SetWindowPos(hwnd, 0, x, y, n_width, n_height, 0x0014 /* SWP_NOZORDER | SWP_NOACTIVATE */)
 }
 
 #[no_mangle]
@@ -5728,6 +5717,244 @@ pub unsafe extern "win64" fn AllowSetForegroundWindow(_dw_process_id: u32) -> i3
 }
 
 #[no_mangle]
+pub unsafe extern "win64" fn SetWinEventHook(
+    _event_min: u32,
+    _event_max: u32,
+    _hmod_win_event_proc: usize,
+    _pfn_win_event_proc: usize,
+    _id_process: u32,
+    _id_thread: u32,
+    _dw_flags: u32,
+) -> usize {
+    0x7001
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn UnhookWinEvent(_h_win_event_hook: usize) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn RegisterSuspendResumeNotification(
+    _h_recipient: usize,
+    _flags: u32,
+) -> usize {
+    0x8001
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn UnregisterSuspendResumeNotification(_handle: usize) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn RegisterPowerSettingNotification(
+    _h_recipient: usize,
+    _power_setting_guid: *const u8,
+    _flags: u32,
+) -> usize {
+    0x8002
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn UnregisterPowerSettingNotification(_handle: usize) -> i32 {
+    1
+}
+
+fn to_upper_u16(c: u16) -> u16 {
+    char::from_u32(c as u32)
+        .and_then(|ch| ch.to_uppercase().next())
+        .and_then(|u| u32::from(u).try_into().ok())
+        .unwrap_or(c)
+}
+
+fn to_lower_u16(c: u16) -> u16 {
+    char::from_u32(c as u32)
+        .and_then(|ch| ch.to_lowercase().next())
+        .and_then(|l| u32::from(l).try_into().ok())
+        .unwrap_or(c)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CharUpperW(lpsz: usize) -> usize {
+    if lpsz == 0 {
+        return 0;
+    }
+    if (lpsz >> 16) == 0 {
+        return to_upper_u16(lpsz as u16) as usize;
+    }
+    let mut p = lpsz as *mut u16;
+    while *p != 0 {
+        *p = to_upper_u16(*p);
+        p = p.add(1);
+    }
+    lpsz
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CharLowerW(lpsz: usize) -> usize {
+    if lpsz == 0 {
+        return 0;
+    }
+    if (lpsz >> 16) == 0 {
+        return to_lower_u16(lpsz as u16) as usize;
+    }
+    let mut p = lpsz as *mut u16;
+    while *p != 0 {
+        *p = to_lower_u16(*p);
+        p = p.add(1);
+    }
+    lpsz
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CharUpperA(lpsz: usize) -> usize {
+    if lpsz == 0 {
+        return 0;
+    }
+    if (lpsz >> 16) == 0 {
+        return (lpsz as u8).to_ascii_uppercase() as usize;
+    }
+    let mut p = lpsz as *mut u8;
+    while *p != 0 {
+        *p = (*p).to_ascii_uppercase();
+        p = p.add(1);
+    }
+    lpsz
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CharLowerA(lpsz: usize) -> usize {
+    if lpsz == 0 {
+        return 0;
+    }
+    if (lpsz >> 16) == 0 {
+        return (lpsz as u8).to_ascii_lowercase() as usize;
+    }
+    let mut p = lpsz as *mut u8;
+    while *p != 0 {
+        *p = (*p).to_ascii_lowercase();
+        p = p.add(1);
+    }
+    lpsz
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CharUpperBuffW(lpsz: *mut u16, cch_length: u32) -> u32 {
+    if lpsz.is_null() {
+        return 0;
+    }
+    for i in 0..cch_length as usize {
+        let p = lpsz.add(i);
+        *p = to_upper_u16(*p);
+    }
+    cch_length
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CharLowerBuffW(lpsz: *mut u16, cch_length: u32) -> u32 {
+    if lpsz.is_null() {
+        return 0;
+    }
+    for i in 0..cch_length as usize {
+        let p = lpsz.add(i);
+        *p = to_lower_u16(*p);
+    }
+    cch_length
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CharUpperBuffA(lpsz: *mut u8, cch_length: u32) -> u32 {
+    if lpsz.is_null() {
+        return 0;
+    }
+    for i in 0..cch_length as usize {
+        let p = lpsz.add(i);
+        *p = (*p).to_ascii_uppercase();
+    }
+    cch_length
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CharLowerBuffA(lpsz: *mut u8, cch_length: u32) -> u32 {
+    if lpsz.is_null() {
+        return 0;
+    }
+    for i in 0..cch_length as usize {
+        let p = lpsz.add(i);
+        *p = (*p).to_ascii_lowercase();
+    }
+    cch_length
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn InitCommonControls() {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn InitCommonControlsEx(_picce: *const u8) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetWindowSubclass(
+    _hwnd: usize,
+    _pfn_subclass: usize,
+    _uid_subclass: usize,
+    _dw_ref_data: usize,
+) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn RemoveWindowSubclass(
+    _hwnd: usize,
+    _pfn_subclass: usize,
+    _uid_subclass: usize,
+) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn DefSubclassProc(
+    hwnd: usize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    DefWindowProcW(hwnd as _, msg, wparam as u64, lparam as u64) as isize
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn TaskDialog(
+    _hwnd_owner: usize,
+    _h_instance: usize,
+    _psz_window_title: *const u16,
+    _psz_main_instruction: *const u16,
+    _psz_content: *const u16,
+    _dw_common_buttons: u32,
+    _psz_icon: *const u16,
+    pn_button: *mut i32,
+) -> i32 {
+    if !pn_button.is_null() {
+        *pn_button = 1; // IDOK
+    }
+    0 // S_OK
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn TaskDialogIndirect(
+    _p_task_config: *const u8,
+    pn_button: *mut i32,
+    _pn_radio_button: *mut i32,
+    _pf_verification_flag_checked: *mut i32,
+) -> i32 {
+    if !pn_button.is_null() {
+        *pn_button = 1; // IDOK
+    }
+    0 // S_OK
+}
+
+#[no_mangle]
 pub unsafe extern "win64" fn GetCaretBlinkTime() -> u32 {
     530
 }
@@ -6459,6 +6686,158 @@ pub unsafe extern "win64" fn wsprintfW(
 ) -> i32 {
     let args = [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14];
     crate::dlls::crt::format_win64_vswprintf(buffer, 1024, format, args.as_ptr() as *mut u64)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn LoadCursorFromFileW(_lp_file_name: *const u16) -> usize {
+    0x10001
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn LoadCursorFromFileA(_lp_file_name: *const u8) -> usize {
+    0x10001
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn DisableProcessWindowsGhosting() {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetProcessWindowStation() -> usize {
+    0x20001
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetUserObjectInformationW(
+    _h_obj: usize,
+    n_index: i32,
+    pv_info: *mut u8,
+    n_length: u32,
+    lpn_length_needed: *mut u32,
+) -> i32 {
+    if n_index == 2 {
+        // UOI_NAME -> "WinSta0"
+        let name: [u16; 8] = [b'W' as u16, b'i' as u16, b'n' as u16, b'S' as u16, b't' as u16, b'a' as u16, b'0' as u16, 0];
+        let needed = (name.len() * 2) as u32;
+        if !lpn_length_needed.is_null() {
+            *lpn_length_needed = needed;
+        }
+        if !pv_info.is_null() && n_length >= needed {
+            std::ptr::copy_nonoverlapping(name.as_ptr() as *const u8, pv_info, needed as usize);
+            return 1;
+        }
+        return 0;
+    }
+    if !lpn_length_needed.is_null() {
+        *lpn_length_needed = 4;
+    }
+    if !pv_info.is_null() && n_length >= 4 {
+        std::ptr::write_bytes(pv_info, 0, n_length as usize);
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetWindowInfo(hwnd: usize, pwi: *mut u8) -> i32 {
+    if pwi.is_null() {
+        return 0;
+    }
+    // WINDOWINFO is 60 bytes: cbSize(4), rcWindow(16), rcClient(16), dwStyle(4), dwExStyle(4), dwWindowStatus(4), cxWindowBorders(4), cyWindowBorders(4), atomWindowType(2), wCreatorVersion(2)
+    let mut rect = Rect { left: 0, top: 0, right: 1280, bottom: 720 };
+    GetWindowRect(hwnd, &mut rect);
+    let mut crect = Rect { left: 0, top: 0, right: 1280, bottom: 720 };
+    GetClientRect(hwnd, &mut crect);
+    let screen_crect = Rect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.left + crect.right,
+        bottom: rect.top + crect.bottom,
+    };
+    *(pwi as *mut u32) = 60;
+    std::ptr::copy_nonoverlapping(&rect as *const Rect as *const u8, pwi.add(4), 16);
+    std::ptr::copy_nonoverlapping(&screen_crect as *const Rect as *const u8, pwi.add(20), 16);
+    *(pwi.add(36) as *mut u32) = 0x10CF0000; // WS_VISIBLE | WS_OVERLAPPEDWINDOW
+    *(pwi.add(40) as *mut u32) = 0;
+    *(pwi.add(44) as *mut u32) = 1; // WS_ACTIVECAPTION
+    *(pwi.add(48) as *mut u32) = 0;
+    *(pwi.add(52) as *mut u32) = 0;
+    *(pwi.add(56) as *mut u16) = 0xC001;
+    *(pwi.add(58) as *mut u16) = 0x0603;
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetTopWindow(_hwnd: usize) -> usize {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn BeginPaint(hwnd: usize, lp_paint: *mut u8) -> usize {
+    let hdc = GetDC(hwnd as u64) as usize;
+    if !lp_paint.is_null() {
+        std::ptr::write_bytes(lp_paint, 0, 72);
+        *(lp_paint as *mut usize) = hdc;
+        *(lp_paint.add(8) as *mut i32) = 1; // fErase
+    }
+    hdc
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn EndPaint(_hwnd: usize, _lp_paint: *const u8) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetSystemMenu(_hwnd: usize, _b_revert: i32) -> usize {
+    0x30001
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn EnableMenuItem(_h_menu: usize, _u_id: u32, _u_enable: u32) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn RegisterHotKey(_hwnd: usize, _id: i32, _fs_modifiers: u32, _vk: u32) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn UnregisterHotKey(_hwnd: usize, _id: i32) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetLayeredWindowAttributes(_hwnd: usize, _cr_key: u32, _b_alpha: u8, _dw_flags: u32) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetWindowDisplayAffinity(_hwnd: usize, pdw_affinity: *mut u32) -> i32 {
+    if !pdw_affinity.is_null() {
+        *pdw_affinity = 0;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetWindowDisplayAffinity(_hwnd: usize, _dw_affinity: u32) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn DrawStateW(
+    _hdc: usize,
+    _hbr_fore: usize,
+    _qfn_call_back: usize,
+    _l_data: usize,
+    _w_data: usize,
+    _x: i32,
+    _y: i32,
+    _cx: i32,
+    _cy: i32,
+    _u_flags: u32,
+) -> i32 {
+    1
 }
 
 #[cfg(test)]

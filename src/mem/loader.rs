@@ -50,6 +50,16 @@ impl LoadedModule {
                 }
                 mmap_reg
             }
+            StorageStrategy::Hybrid => {
+                // Keep critical PE in RAM (unlocked), while VFS & assets stay on disk
+                MmapRegion::allocate_memfd(
+                    name,
+                    Some(requested_image_base),
+                    image_size,
+                    raw_pe_bytes,
+                    libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                )?
+            }
             StorageStrategy::DiskDemand => {
                 // Allocate anonymous memory mapped on-demand
                 MmapRegion::allocate_anonymous(
@@ -182,8 +192,12 @@ impl LoadedModule {
 
         // 5. Register main module in companion modules and loaded module registry
         let mut main_exports = std::collections::HashMap::new();
-        for (exp_name, exp_rva, _ord) in pe.exports() {
+        for (ord, exp_rva) in pe.exports_by_ordinal() {
+            main_exports.insert(format!("#{}", ord), exp_rva);
+        }
+        for (exp_name, exp_rva, ord) in pe.exports() {
             main_exports.insert(exp_name.to_string(), exp_rva);
+            main_exports.insert(format!("#{}", ord), exp_rva);
         }
         let clean_name = name.replace('\\', "/");
         let file_name = std::path::Path::new(&clean_name)
@@ -380,17 +394,11 @@ pub fn get_module_path(base: usize) -> Option<String> {
 
 impl LoadedModule {
     pub fn load_companion_dll(dll_name: &str) -> Option<usize> {
-        let mut clean_name = dll_name.replace('\\', "/");
-        while clean_name.to_ascii_lowercase().ends_with(".dll.dll") {
-            clean_name.truncate(clean_name.len() - 4);
-        }
-        let mut file_name = std::path::Path::new(&clean_name)
+        let clean_name = dll_name.replace('\\', "/");
+        let file_name = std::path::Path::new(&clean_name)
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| clean_name.clone());
-        while file_name.to_ascii_lowercase().ends_with(".dll.dll") {
-            file_name.truncate(file_name.len() - 4);
-        }
         let name_lower = file_name.to_lowercase();
         let clean_lower = clean_name.to_lowercase();
         {
@@ -655,8 +663,12 @@ impl LoadedModule {
         }
 
         let mut export_map = std::collections::HashMap::new();
-        for (exp_name, exp_rva, _ord) in pe.exports() {
+        for (ord, exp_rva) in pe.exports_by_ordinal() {
+            export_map.insert(format!("#{}", ord), exp_rva);
+        }
+        for (exp_name, exp_rva, ord) in pe.exports() {
             export_map.insert(exp_name.to_string(), exp_rva);
+            export_map.insert(format!("#{}", ord), exp_rva);
         }
 
         // Apply executable protection BEFORE calling TLS callbacks or DllMain!
@@ -767,17 +779,11 @@ impl LoadedModule {
     }
 
     pub fn lookup_companion_export(dll_name: &str, symbol_name: &str) -> Option<usize> {
-        let mut clean_name = dll_name.replace('\\', "/");
-        while clean_name.to_ascii_lowercase().ends_with(".dll.dll") {
-            clean_name.truncate(clean_name.len() - 4);
-        }
-        let mut file_name = std::path::Path::new(&clean_name)
+        let clean_name = dll_name.replace('\\', "/");
+        let file_name = std::path::Path::new(&clean_name)
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| clean_name.clone());
-        while file_name.to_ascii_lowercase().ends_with(".dll.dll") {
-            file_name.truncate(file_name.len() - 4);
-        }
         let name_lower = file_name.to_lowercase();
         let clean_lower = clean_name.to_lowercase();
         Self::load_companion_dll(dll_name);

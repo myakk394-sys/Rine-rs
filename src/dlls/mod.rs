@@ -19,6 +19,7 @@ pub mod hid;
 pub mod imm32;
 pub mod iphlpapi;
 pub mod kernel32;
+pub mod mf;
 pub mod net;
 pub mod ntdll;
 pub mod object_registry;

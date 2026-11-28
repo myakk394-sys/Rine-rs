@@ -467,6 +467,147 @@ pub unsafe extern "win64" fn RtlGetVersion(lp_version_information: *mut OsVersio
 }
 
 #[no_mangle]
+pub unsafe extern "win64" fn RtlDllShutdownInProgress() -> u8 {
+    0 // FALSE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn NtDeviceIoControlFile(
+    _file_handle: *mut std::ffi::c_void,
+    _event: *mut std::ffi::c_void,
+    _apc_routine: *const std::ffi::c_void,
+    _apc_context: *mut std::ffi::c_void,
+    io_status_block: *mut IO_STATUS_BLOCK,
+    _io_control_code: u32,
+    _input_buffer: *const std::ffi::c_void,
+    _input_buffer_length: u32,
+    _output_buffer: *mut std::ffi::c_void,
+    _output_buffer_length: u32,
+) -> i32 {
+    const STATUS_NOT_SUPPORTED: i32 = -1073741637; // 0xC00000BB
+    if !io_status_block.is_null() {
+        (*io_status_block).status = STATUS_NOT_SUPPORTED;
+        (*io_status_block).information = 0;
+    }
+    STATUS_NOT_SUPPORTED
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn NtQueryVolumeInformationFile(
+    _file_handle: *mut std::ffi::c_void,
+    io_status_block: *mut IO_STATUS_BLOCK,
+    fs_information: *mut u8,
+    length: u32,
+    fs_information_class: u32,
+) -> i32 {
+    const STATUS_SUCCESS: i32 = 0;
+    const STATUS_INVALID_PARAMETER: i32 = -1073741811; // 0xC000000D
+    const STATUS_BUFFER_TOO_SMALL: i32 = -1073741789; // 0xC0000023
+    const STATUS_NOT_SUPPORTED: i32 = -1073741637; // 0xC00000BB
+
+    if io_status_block.is_null() || fs_information.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+        println!(
+            "[NTDLL] NtQueryVolumeInformationFile(fd={:?}, class={}, len={})",
+            _file_handle, fs_information_class, length
+        );
+    }
+    match fs_information_class {
+        1 => {
+            // FileFsVolumeInformation
+            if length < 18 {
+                (*io_status_block).status = STATUS_BUFFER_TOO_SMALL;
+                (*io_status_block).information = 0;
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            std::ptr::write_bytes(fs_information, 0, (length as usize).min(26));
+            *(fs_information as *mut i64) = 132000000000000000i64; // VolumeCreationTime
+            *(fs_information.add(8) as *mut u32) = 0x12345678; // VolumeSerialNumber
+            *(fs_information.add(12) as *mut u32) = 8; // VolumeLabelLength ("RINE" in UTF-16)
+            *fs_information.add(16) = 0; // SupportsObjects
+            if length >= 26 {
+                let label = [b'R' as u16, b'I' as u16, b'N' as u16, b'E' as u16];
+                std::ptr::copy_nonoverlapping(label.as_ptr(), fs_information.add(18) as *mut u16, 4);
+            }
+            (*io_status_block).status = STATUS_SUCCESS;
+            (*io_status_block).information = 26.min(length as usize);
+            STATUS_SUCCESS
+        }
+        4 => {
+            // FileFsDeviceInformation: DeviceType (u32), Characteristics (u32)
+            if length < 8 {
+                (*io_status_block).status = STATUS_BUFFER_TOO_SMALL;
+                (*io_status_block).information = 0;
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            std::ptr::write_bytes(fs_information, 0, 8);
+            *(fs_information as *mut u32) = 7; // FILE_DEVICE_DISK
+            *(fs_information.add(4) as *mut u32) = 0x20; // FILE_DEVICE_IS_MOUNTED
+            (*io_status_block).status = STATUS_SUCCESS;
+            (*io_status_block).information = 8;
+            STATUS_SUCCESS
+        }
+        5 => {
+            // FileFsAttributeInformation
+            if length < 16 {
+                (*io_status_block).status = STATUS_BUFFER_TOO_SMALL;
+                (*io_status_block).information = 0;
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            std::ptr::write_bytes(fs_information, 0, (length as usize).min(20));
+            *(fs_information as *mut u32) = 0x0000_000F; // FILE_CASE_SENSITIVE_SEARCH | PRESERVED_CASE | UNICODE
+            *(fs_information.add(4) as *mut i32) = 255;
+            *(fs_information.add(8) as *mut u32) = 8; // "NTFS" in UTF-16 bytes
+            if length >= 20 {
+                let name_u16 = [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16];
+                std::ptr::copy_nonoverlapping(name_u16.as_ptr(), fs_information.add(12) as *mut u16, 4);
+            }
+            (*io_status_block).status = STATUS_SUCCESS;
+            (*io_status_block).information = 20.min(length as usize);
+            STATUS_SUCCESS
+        }
+        _ => {
+            (*io_status_block).status = STATUS_NOT_SUPPORTED;
+            (*io_status_block).information = 0;
+            STATUS_NOT_SUPPORTED
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn NtQuerySystemInformation(
+    system_information_class: u32,
+    system_information: *mut u8,
+    system_information_length: u32,
+    return_length: *mut u32,
+) -> i32 {
+    const STATUS_SUCCESS: i32 = 0;
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = -1073741820; // 0xC0000004
+    const STATUS_NOT_IMPLEMENTED: i32 = -1073741822; // 0xC0000002
+
+    if system_information_class == 0 {
+        // SystemBasicInformation (64 bytes on Win64)
+        if !return_length.is_null() {
+            *return_length = 64;
+        }
+        if system_information.is_null() || system_information_length < 64 {
+            return STATUS_INFO_LENGTH_MISMATCH;
+        }
+        std::ptr::write_bytes(system_information, 0, 64);
+        *(system_information.add(8) as *mut u32) = 4096; // PageSize
+        let ncpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        *system_information.add(56) = ncpus.min(255) as u8; // NumberOfProcessors
+        return STATUS_SUCCESS;
+    }
+    if !return_length.is_null() {
+        *return_length = 0;
+    }
+    STATUS_NOT_IMPLEMENTED
+}
+
+#[no_mangle]
 pub unsafe extern "win64" fn RtlVerifyVersionInfo(
     _version_info: *const OsVersionInfoExW,
     _type_mask: u32,
@@ -1106,6 +1247,24 @@ pub unsafe extern "win64" fn ZwQueryDirectoryFileEx(
 }
 
 #[no_mangle]
+fn host_path_to_nt_rel_path(path: Option<&std::path::Path>) -> String {
+    let Some(p) = path else {
+        return "\\".to_string();
+    };
+    let s = p.to_string_lossy();
+    if let Some(idx) = s.find("/drive_c/") {
+        return s[idx + "/drive_c".len()..].replace('/', "\\");
+    }
+    if s.ends_with("/drive_c") {
+        return "\\".to_string();
+    }
+    if let Some(idx) = s.find("/.local/share/Steam/") {
+        let rest = &s[idx + "/.local/share/Steam/".len()..];
+        return format!("\\Program Files (x86)\\Steam\\{}", rest.replace('/', "\\"));
+    }
+    s.replace('/', "\\")
+}
+
 pub unsafe extern "win64" fn NtQueryInformationFile(
     file_handle: usize,
     io_status_block: *mut IO_STATUS_BLOCK,
@@ -1119,6 +1278,12 @@ pub unsafe extern "win64" fn NtQueryInformationFile(
 
     let dir_path = std::fs::read_link(format!("/proc/self/fd/{}", file_handle)).ok();
     let meta = dir_path.as_ref().and_then(|p| std::fs::metadata(p).ok());
+    if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+        println!(
+            "[NTDLL] NtQueryInformationFile(fd={}, class={}, len={}, path={:?})",
+            file_handle, file_information_class, length, dir_path
+        );
+    }
 
     match file_information_class {
         4 => {
@@ -1138,9 +1303,8 @@ pub unsafe extern "win64" fn NtQueryInformationFile(
             *((file_information.add(8)) as *mut i64) = ft;
             *((file_information.add(16)) as *mut i64) = ft;
             *((file_information.add(24)) as *mut i64) = ft;
-            *((file_information.add(32)) as *mut i64) = ft;
             let attr = if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) { 0x10u32 } else { 0x20u32 };
-            *((file_information.add(36)) as *mut u32) = attr;
+            *((file_information.add(32)) as *mut u32) = attr;
             if !io_status_block.is_null() {
                 (*io_status_block).status = 0;
                 (*io_status_block).information = 40;
@@ -1165,6 +1329,95 @@ pub unsafe extern "win64" fn NtQueryInformationFile(
                 (*io_status_block).information = 24;
             }
             0
+        }
+        9 => {
+            // FileNameInformation (4 + WCHAR[])
+            if length < 4 {
+                return -1073741789; // STATUS_BUFFER_TOO_SMALL
+            }
+            let nt_name = host_path_to_nt_rel_path(dir_path.as_deref());
+            let utf16: Vec<u16> = nt_name.encode_utf16().collect();
+            let byte_len = utf16.len() * 2;
+            *((file_information as *mut u32)) = byte_len as u32;
+            let avail_bytes = (length as usize).saturating_sub(4);
+            let copy_chars = utf16.len().min(avail_bytes / 2);
+            let dst = file_information.add(4) as *mut u16;
+            for i in 0..copy_chars {
+                *dst.add(i) = utf16[i];
+            }
+            let status = if byte_len > avail_bytes {
+                -2147483643i32 // STATUS_BUFFER_OVERFLOW (0x80000005)
+            } else {
+                0
+            };
+            if !io_status_block.is_null() {
+                (*io_status_block).status = status;
+                (*io_status_block).information = 4 + copy_chars * 2;
+            }
+            status
+        }
+        18 => {
+            // FileAllInformation (Basic=40, Standard=24, Internal=8, Ea=4, Access=4, Position=8, Mode=4, Alignment=4, Name=4+WCHAR[])
+            // Total fixed header before FileName[] is 100 bytes.
+            if length < 100 {
+                return -1073741789; // STATUS_BUFFER_TOO_SMALL
+            }
+            std::ptr::write_bytes(file_information, 0, length as usize);
+            let ft = if let Some(ref m) = meta {
+                if let Ok(mod_time) = m.modified() {
+                    if let Ok(dur) = mod_time.duration_since(std::time::UNIX_EPOCH) {
+                        ((dur.as_secs() + 11644473600) * 10_000_000 + (dur.subsec_nanos() as u64 / 100)) as i64
+                    } else { 116444736000000000i64 }
+                } else { 116444736000000000i64 }
+            } else { 116444736000000000i64 };
+            let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+            let attr = if is_dir { 0x10u32 } else { 0x20u32 };
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0) as i64;
+
+            // BasicInformation (0..40)
+            *((file_information.add(0)) as *mut i64) = ft;
+            *((file_information.add(8)) as *mut i64) = ft;
+            *((file_information.add(16)) as *mut i64) = ft;
+            *((file_information.add(24)) as *mut i64) = ft;
+            *((file_information.add(32)) as *mut u32) = attr;
+
+            // StandardInformation (40..64)
+            *((file_information.add(40)) as *mut i64) = (size + 4095) & !4095;
+            *((file_information.add(48)) as *mut i64) = size;
+            *((file_information.add(56)) as *mut u32) = 1;
+            *file_information.add(60) = 0;
+            *file_information.add(61) = if is_dir { 1 } else { 0 };
+
+            // InternalInformation (64..72)
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(file_handle as i32, &mut st) == 0 {
+                *((file_information.add(64)) as *mut u64) = st.st_ino as u64;
+            }
+
+            // AccessInformation (76..80)
+            *((file_information.add(76)) as *mut u32) = 0x00120089; // FILE_GENERIC_READ
+
+            // NameInformation (96..100+name)
+            let nt_name = host_path_to_nt_rel_path(dir_path.as_deref());
+            let utf16: Vec<u16> = nt_name.encode_utf16().collect();
+            let byte_len = utf16.len() * 2;
+            *((file_information.add(96)) as *mut u32) = byte_len as u32;
+            let avail_bytes = (length as usize).saturating_sub(100);
+            let copy_chars = utf16.len().min(avail_bytes / 2);
+            let dst = file_information.add(100) as *mut u16;
+            for i in 0..copy_chars {
+                *dst.add(i) = utf16[i];
+            }
+            let status = if byte_len > avail_bytes {
+                -2147483643i32 // STATUS_BUFFER_OVERFLOW (0x80000005)
+            } else {
+                0
+            };
+            if !io_status_block.is_null() {
+                (*io_status_block).status = status;
+                (*io_status_block).information = 100 + copy_chars * 2;
+            }
+            status
         }
         _ => {
             std::ptr::write_bytes(file_information, 0, length as usize);

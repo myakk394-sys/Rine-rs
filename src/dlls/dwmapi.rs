@@ -82,3 +82,24 @@ pub unsafe extern "win64" fn DwmIsCompositionEnabled(pf_enabled: *mut i32) -> i3
 pub unsafe extern "win64" fn DwmFlush() -> i32 {
     0 // S_OK
 }
+
+pub unsafe extern "win64" fn DwmGetCompositionTimingInfo(
+    _hwnd: usize,
+    p_timing_info: *mut u8,
+) -> i32 {
+    if !p_timing_info.is_null() {
+        let cb_size = *(p_timing_info as *const u32);
+        if cb_size >= 292 {
+            std::ptr::write_bytes(p_timing_info.add(4), 0, (cb_size - 4) as usize);
+            // rateRefresh: 60/1
+            *(p_timing_info.add(4) as *mut u32) = 60;
+            *(p_timing_info.add(8) as *mut u32) = 1;
+            // qpcRefreshPeriod (10MHz / 60 = 166667)
+            *(p_timing_info.add(16) as *mut u64) = 166_667;
+            // rateCompose: 60/1
+            *(p_timing_info.add(24) as *mut u32) = 60;
+            *(p_timing_info.add(28) as *mut u32) = 1;
+        }
+    }
+    0 // S_OK
+}

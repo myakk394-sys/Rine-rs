@@ -1027,6 +1027,94 @@ pub unsafe extern "win64" fn getservbyport(
     native::getservbyport(port, proto)
 }
 
+#[no_mangle]
+pub unsafe extern "win64" fn GetHostNameW(name: *mut u16, namelen: i32) -> i32 {
+    if name.is_null() || namelen <= 0 {
+        return -1;
+    }
+    let mut buf = [0u8; 256];
+    let res = libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len());
+    let host = if res == 0 {
+        std::ffi::CStr::from_ptr(buf.as_ptr() as *const libc::c_char)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        "rine-win64".to_string()
+    };
+    let utf16: Vec<u16> = host.encode_utf16().chain(std::iter::once(0)).collect();
+    if utf16.len() > namelen as usize {
+        return -1;
+    }
+    std::ptr::copy_nonoverlapping(utf16.as_ptr(), name, utf16.len());
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn WSALookupServiceBeginW(
+    _lpqs_restrictions: *const u8,
+    _dw_control_flags: u32,
+    lph_lookup: *mut usize,
+) -> i32 {
+    if !lph_lookup.is_null() {
+        *lph_lookup = 0x5001;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn WSALookupServiceBeginA(
+    _lpqs_restrictions: *const u8,
+    _dw_control_flags: u32,
+    lph_lookup: *mut usize,
+) -> i32 {
+    if !lph_lookup.is_null() {
+        *lph_lookup = 0x5001;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn WSALookupServiceNextW(
+    _h_lookup: usize,
+    _dw_control_flags: u32,
+    _lpdw_buffer_length: *mut u32,
+    _lpqs_results: *mut u8,
+) -> i32 {
+    WSASetLastError(10110); // WSA_E_NO_MORE
+    -1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn WSALookupServiceNextA(
+    _h_lookup: usize,
+    _dw_control_flags: u32,
+    _lpdw_buffer_length: *mut u32,
+    _lpqs_results: *mut u8,
+) -> i32 {
+    WSASetLastError(10110); // WSA_E_NO_MORE
+    -1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn WSALookupServiceEnd(_h_lookup: usize) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn WSANSPIoctl(
+    _h_lookup: usize,
+    _dw_control_code: u32,
+    _lpv_in_buffer: *const u8,
+    _cb_in_buffer: u32,
+    _lpv_out_buffer: *mut u8,
+    _cb_out_buffer: u32,
+    _lpcb_bytes_returned: *mut u32,
+    _lp_completion: *mut u8,
+) -> i32 {
+    WSASetLastError(10045); // WSAEOPNOTSUPP
+    -1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

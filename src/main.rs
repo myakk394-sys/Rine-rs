@@ -6,12 +6,21 @@ use std::process::exit;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    println!("[RINE ENGINE] Initializing Rine Win64 PE Execution Engine v0.2.0...");
+    println!("[RINE ENGINE] Initializing Rine Win64 PE Execution Engine v0.3.0...");
     if std::env::var_os("DXVK_LOG_LEVEL").is_none() {
         std::env::set_var("DXVK_LOG_LEVEL", "warn");
     }
     if std::env::var_os("DXVK_LOG_PATH").is_none() {
         std::env::set_var("DXVK_LOG_PATH", "/tmp");
+    }
+    if std::env::var_os("DXVK_STATE_CACHE").is_none() {
+        std::env::set_var("DXVK_STATE_CACHE", "1");
+    }
+    if std::env::var_os("DXVK_STATE_CACHE_PATH").is_none() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let cache_dir = std::path::PathBuf::from(home).join(".local/share/rine/dxvk_cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        std::env::set_var("DXVK_STATE_CACHE_PATH", cache_dir);
     }
     rine::sys::setup_signal_handlers();
     rine::windowing::x11::ensure_x11_environment();
@@ -111,6 +120,9 @@ fn main() {
             "--disk-demand" => {
                 strategy = StorageStrategy::DiskDemand;
             }
+            "--hybrid" => {
+                strategy = StorageStrategy::Hybrid;
+            }
             s if !s.starts_with('-') && exe_path.is_empty() => {
                 exe_path = s;
             }
@@ -156,8 +168,22 @@ fn main() {
         .unwrap_or("Rine Application");
     let window_title = format!("{} (Rine)", exe_stem);
 
+    let mem_check = rine::mem::strategy::assess_memory_for_game(Path::new(exe_path), strategy);
+    if mem_check.insufficient_ram && matches!(strategy, StorageStrategy::RamOnly { .. }) {
+        let avail_gb = mem_check.available_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let game_gb = mem_check.game_size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        println!(
+            "[RINE MEMORY] Insufficient RAM ({:.1} GB free < {:.1} GB game). Switching to Hybrid mode (critical PE in RAM, assets on disk).",
+            avail_gb, game_gb
+        );
+        strategy = StorageStrategy::Hybrid;
+    }
+
     println!("[Rine] Loading PE binary: {}", exe_path);
     println!("[Rine] Storage strategy: {:?}", strategy);
+    if matches!(strategy, StorageStrategy::Hybrid) {
+        rine::mem::strategy::start_hybrid_ram_headroom_guard(3 * 1024 * 1024 * 1024);
+    }
 
     let is_ram = matches!(strategy, StorageStrategy::RamOnly { .. });
     rine::sys::RineVfs::init(exe_path, working_dir.as_deref(), is_ram);
@@ -170,6 +196,14 @@ fn main() {
         .parent()
         .map(|p| p.join("UnityPlayer.dll").exists())
         .unwrap_or(false);
+    let is_chromium_app = Path::new(exe_path)
+        .parent()
+        .map(|p| {
+            p.join("icudtl.dat").exists()
+                || p.join("chrome_elf.dll").exists()
+                || (p.join("ffmpeg.dll").exists() && p.join("resources").exists())
+        })
+        .unwrap_or(false);
     let mut unity_extra_args = String::new();
     if is_unity_game {
         if !trailing_args.contains("-screen-width") {
@@ -177,6 +211,13 @@ fn main() {
         }
         if !trailing_args.contains("-screen-fullscreen") {
             unity_extra_args.push_str(" -screen-fullscreen 0");
+        }
+    } else if is_chromium_app {
+        if !trailing_args.contains("--no-sandbox") {
+            unity_extra_args.push_str(" --no-sandbox");
+        }
+        if !trailing_args.contains("--disable-gpu-sandbox") {
+            unity_extra_args.push_str(" --disable-gpu-sandbox");
         }
     }
 

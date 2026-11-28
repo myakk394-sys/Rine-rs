@@ -1565,9 +1565,14 @@ pub unsafe extern "win64" fn VirtualAlloc(
         } else {
             prot
         };
+        // Windows VirtualAlloc(NULL, ...) always returns addresses aligned to
+        // dwAllocationGranularity (64 KiB = 0x10000). UE4 FMallocBinned2 relies on
+        // (ptr & ~0xFFFF) pointing to the pool header.
+        const GRANULARITY: usize = 0x10000;
+        let padded_size = alloc_size + GRANULARITY;
         let ptr = libc::mmap(
             std::ptr::null_mut(),
-            alloc_size,
+            padded_size,
             mmap_prot,
             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
             -1,
@@ -1576,7 +1581,17 @@ pub unsafe extern "win64" fn VirtualAlloc(
         if ptr == libc::MAP_FAILED || ptr.is_null() {
             0
         } else {
-            let base = ptr as usize;
+            let raw_base = ptr as usize;
+            let base = (raw_base + GRANULARITY - 1) & !(GRANULARITY - 1);
+            let prefix = base - raw_base;
+            if prefix > 0 {
+                libc::munmap(raw_base as *mut libc::c_void, prefix);
+            }
+            let raw_end = raw_base + padded_size;
+            let aligned_end = base + alloc_size;
+            if raw_end > aligned_end {
+                libc::munmap(aligned_end as *mut libc::c_void, raw_end - aligned_end);
+            }
             let mut guard = VIRTUAL_ALLOC_REGISTRY.lock().unwrap();
             let table = guard.get_or_insert_with(Vec::new);
             table.push(VirtualAllocEntry {
@@ -1648,18 +1663,22 @@ pub unsafe extern "win64" fn VirtualAlloc(
         }
     };
 
-    println!(
-        "[KERNEL32 MEM] VirtualAlloc(lpAddress=0x{:X}, size=0x{:X}, type=0x{:X}, protect=0x{:X}) -> 0x{:X}",
-        lp_address, dw_size, fl_allocation_type, fl_protect, res
-    );
+    if std::env::var_os("RINE_VERBOSE_MEM").is_some() {
+        println!(
+            "[KERNEL32 MEM] VirtualAlloc(lpAddress=0x{:X}, size=0x{:X}, type=0x{:X}, protect=0x{:X}) -> 0x{:X}",
+            lp_address, dw_size, fl_allocation_type, fl_protect, res
+        );
+    }
     res
 }
 
 pub unsafe extern "win64" fn VirtualFree(address: usize, size: usize, free_type: u32) -> i32 {
-    println!(
-        "[KERNEL32 MEM] VirtualFree(address=0x{:X}, size=0x{:X}, free_type=0x{:X})",
-        address, size, free_type
-    );
+    if std::env::var_os("RINE_VERBOSE_MEM").is_some() {
+        println!(
+            "[KERNEL32 MEM] VirtualFree(address=0x{:X}, size=0x{:X}, free_type=0x{:X})",
+            address, size, free_type
+        );
+    }
     if address == 0 {
         return 0;
     }
@@ -1839,6 +1858,12 @@ pub unsafe extern "win64" fn VirtualQuery(
                 None => continue,
             };
 
+            if lp_address < start {
+                // Address lies in a free gap before the next mapped region.
+                found = Some((0, start, 0x01 /* PAGE_NOACCESS */, 0x10000 /* MEM_FREE */, 0));
+                break;
+            }
+
             if lp_address >= start && lp_address < end {
                 let p_bytes = perms.as_bytes();
                 let r = p_bytes.get(0).copied().unwrap_or(b'-') == b'r';
@@ -1875,7 +1900,8 @@ pub unsafe extern "win64" fn VirtualQuery(
         }
         found.unwrap_or_else(|| {
             let page_base = lp_address & !0xFFF;
-            (0, page_base + 0x1000, 0x01 /* PAGE_NOACCESS */, 0x10000 /* MEM_FREE */, 0)
+            let user_limit = 0x7FFF_FFFF_0000usize.max(page_base.saturating_add(0x1000));
+            (0, user_limit, 0x01 /* PAGE_NOACCESS */, 0x10000 /* MEM_FREE */, 0)
         })
     } else {
         let page_base = lp_address & !0xFFF;
@@ -2274,6 +2300,23 @@ pub unsafe extern "win64" fn GetProcessTimes(
 }
 
 #[no_mangle]
+pub unsafe extern "win64" fn GetThreadTimes(
+    _h_thread: u64,
+    lp_creation_time: *mut u64,
+    lp_exit_time: *mut u64,
+    lp_kernel_time: *mut u64,
+    lp_user_time: *mut u64,
+) -> i32 {
+    let mut now_ft = 0u64;
+    GetSystemTimeAsFileTime(&mut now_ft);
+    if !lp_creation_time.is_null() { *lp_creation_time = now_ft; }
+    if !lp_exit_time.is_null() { *lp_exit_time = 0; }
+    if !lp_kernel_time.is_null() { *lp_kernel_time = 10_000; }
+    if !lp_user_time.is_null() { *lp_user_time = 10_000; }
+    1
+}
+
+#[no_mangle]
 pub unsafe extern "win64" fn GetSystemTimes(
     lp_idle_time: *mut u64,
     lp_kernel_time: *mut u64,
@@ -2614,6 +2657,39 @@ pub unsafe extern "win64" fn GetTimeFormatW(
 }
 
 #[no_mangle]
+fn canonicalize_win32_path(raw: &str) -> String {
+    let slash = raw.replace('/', "\\");
+    let (prefix, rest) = if slash.len() >= 2 && slash.as_bytes()[1] == b':' {
+        (&slash[..2], &slash[2..])
+    } else if slash.starts_with("\\\\") {
+        ("\\\\", &slash[2..])
+    } else {
+        ("", slash.as_str())
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in rest.split('\\') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            parts.pop();
+        } else {
+            parts.push(seg);
+        }
+    }
+    if !prefix.is_empty() {
+        if parts.is_empty() {
+            format!("{}\\", prefix)
+        } else {
+            format!("{}\\{}", prefix, parts.join("\\"))
+        }
+    } else if slash.starts_with('\\') {
+        format!("\\{}", parts.join("\\"))
+    } else {
+        parts.join("\\")
+    }
+}
+
 pub unsafe extern "win64" fn GetFullPathNameW(
     lp_file_name: *const u16,
     n_buffer_length: u32,
@@ -2624,7 +2700,7 @@ pub unsafe extern "win64" fn GetFullPathNameW(
         return 0;
     }
     let name_str = read_utf16_ptr(lp_file_name).unwrap_or_default();
-    let full = if name_str.contains(':') || name_str.starts_with('\\') {
+    let raw_full = if name_str.contains(':') || name_str.starts_with('\\') {
         name_str
     } else {
         let cwd = get_process_current_directory();
@@ -2634,6 +2710,7 @@ pub unsafe extern "win64" fn GetFullPathNameW(
             format!("{}\\{}", cwd, name_str)
         }
     };
+    let full = canonicalize_win32_path(&raw_full);
     let utf16: Vec<u16> = full.encode_utf16().collect();
     if lp_buffer.is_null() || n_buffer_length < (utf16.len() + 1) as u32 {
         return (utf16.len() + 1) as u32;
@@ -2949,6 +3026,406 @@ pub unsafe extern "win64" fn DebugBreak() {
     println!("[KERNEL32] DebugBreak() called (no-op in Rine)");
 }
 
+static CONSOLE_CTRL_HANDLERS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+#[no_mangle]
+pub unsafe extern "win64" fn DiscardVirtualMemory(virtual_address: usize, size: usize) -> u32 {
+    if virtual_address > 0x10000 && size > 0 {
+        let aligned_addr = virtual_address & !4095;
+        let end = (virtual_address + size + 4095) & !4095;
+        libc::madvise(aligned_addr as *mut libc::c_void, end - aligned_addr, libc::MADV_DONTNEED);
+    }
+    0 // ERROR_SUCCESS
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn PrefetchVirtualMemory(
+    _h_process: usize,
+    _number_of_entries: usize,
+    _virtual_addresses: *const usize,
+    _flags: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetThreadInformation(
+    _h_thread: usize,
+    _thread_information_class: u32,
+    _thread_information: *const std::ffi::c_void,
+    _thread_information_size: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetProcessInformation(
+    _h_process: usize,
+    _process_information_class: u32,
+    _process_information: *const std::ffi::c_void,
+    _process_information_size: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn IsWow64Process2(
+    _h_process: usize,
+    p_process_machine: *mut u16,
+    p_native_machine: *mut u16,
+) -> i32 {
+    if !p_process_machine.is_null() {
+        *p_process_machine = 0; // IMAGE_FILE_MACHINE_UNKNOWN (not WoW64)
+    }
+    if !p_native_machine.is_null() {
+        *p_native_machine = 0x8664; // IMAGE_FILE_MACHINE_AMD64
+    }
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetProductInfo(
+    _os_major: u32,
+    _os_minor: u32,
+    _sp_major: u32,
+    _sp_minor: u32,
+    pdw_returned_product_type: *mut u32,
+) -> i32 {
+    if !pdw_returned_product_type.is_null() {
+        *pdw_returned_product_type = 0x30; // PRODUCT_PROFESSIONAL
+    }
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetComputerNameExW(
+    _name_type: u32,
+    lp_buffer: *mut u16,
+    n_size: *mut u32,
+) -> i32 {
+    if n_size.is_null() {
+        SetLastError(87);
+        return 0;
+    }
+    let name: Vec<u16> = "RINE-WIN64".encode_utf16().collect();
+    if lp_buffer.is_null() || *n_size < (name.len() as u32 + 1) {
+        *n_size = name.len() as u32 + 1;
+        SetLastError(234); // ERROR_MORE_DATA
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(name.as_ptr(), lp_buffer, name.len());
+    *lp_buffer.add(name.len()) = 0;
+    *n_size = name.len() as u32;
+    1
+}
+
+struct IocpPacket {
+    bytes_transferred: u32,
+    completion_key: usize,
+    overlapped: usize,
+}
+
+struct IocpQueue {
+    packets: std::collections::VecDeque<IocpPacket>,
+}
+
+static IOCP_TABLE: std::sync::Mutex<
+    Option<std::collections::HashMap<u64, std::sync::Arc<(std::sync::Mutex<IocpQueue>, std::sync::Condvar)>>>,
+> = std::sync::Mutex::new(None);
+static NEXT_IOCP_HANDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x50000);
+
+#[no_mangle]
+pub unsafe extern "win64" fn CreateIoCompletionPort(
+    _file_handle: usize,
+    existing_completion_port: u64,
+    _completion_key: usize,
+    _number_of_concurrent_threads: u32,
+) -> u64 {
+    if existing_completion_port != 0 {
+        return existing_completion_port;
+    }
+    let handle = NEXT_IOCP_HANDLE.fetch_add(4, std::sync::atomic::Ordering::SeqCst);
+    let q = std::sync::Arc::new((
+        std::sync::Mutex::new(IocpQueue {
+            packets: std::collections::VecDeque::new(),
+        }),
+        std::sync::Condvar::new(),
+    ));
+    let mut g = IOCP_TABLE.lock().unwrap();
+    g.get_or_insert_with(std::collections::HashMap::new).insert(handle, q);
+    handle
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn PostQueuedCompletionStatus(
+    completion_port: u64,
+    dw_number_of_bytes_transferred: u32,
+    dw_completion_key: usize,
+    lp_overlapped: usize,
+) -> i32 {
+    let q_arc = {
+        let g = IOCP_TABLE.lock().unwrap();
+        g.as_ref().and_then(|m| m.get(&completion_port).cloned())
+    };
+    if let Some(arc) = q_arc {
+        let (lock, cvar) = &*arc;
+        let mut q = lock.lock().unwrap();
+        q.packets.push_back(IocpPacket {
+            bytes_transferred: dw_number_of_bytes_transferred,
+            completion_key: dw_completion_key,
+            overlapped: lp_overlapped,
+        });
+        cvar.notify_one();
+        1
+    } else {
+        SetLastError(6);
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetQueuedCompletionStatus(
+    completion_port: u64,
+    lp_number_of_bytes_transferred: *mut u32,
+    lp_completion_key: *mut usize,
+    lp_overlapped: *mut usize,
+    dw_milliseconds: u32,
+) -> i32 {
+    let q_arc = {
+        let g = IOCP_TABLE.lock().unwrap();
+        g.as_ref().and_then(|m| m.get(&completion_port).cloned())
+    };
+    let arc = match q_arc {
+        Some(a) => a,
+        None => {
+            SetLastError(6);
+            return 0;
+        }
+    };
+    let (lock, cvar) = &*arc;
+    let mut q = lock.lock().unwrap();
+    if q.packets.is_empty() && dw_milliseconds > 0 {
+        if dw_milliseconds == 0xFFFFFFFF {
+            while q.packets.is_empty() {
+                q = cvar.wait(q).unwrap();
+            }
+        } else {
+            let dur = std::time::Duration::from_millis(dw_milliseconds as u64);
+            let (nq, _) = cvar.wait_timeout(q, dur).unwrap();
+            q = nq;
+        }
+    }
+    if let Some(pkt) = q.packets.pop_front() {
+        if !lp_number_of_bytes_transferred.is_null() {
+            *lp_number_of_bytes_transferred = pkt.bytes_transferred;
+        }
+        if !lp_completion_key.is_null() {
+            *lp_completion_key = pkt.completion_key;
+        }
+        if !lp_overlapped.is_null() {
+            *lp_overlapped = pkt.overlapped;
+        }
+        1
+    } else {
+        if !lp_overlapped.is_null() {
+            *lp_overlapped = 0;
+        }
+        SetLastError(258); // WAIT_TIMEOUT
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetConsoleTitleW(lp_console_title: *mut u16, n_size: u32) -> u32 {
+    if lp_console_title.is_null() || n_size == 0 {
+        return 0;
+    }
+    let title: Vec<u16> = "Rine Console".encode_utf16().collect();
+    let max_chars = (n_size as usize).saturating_sub(1);
+    let copy_len = title.len().min(max_chars);
+    for i in 0..copy_len {
+        *lp_console_title.add(i) = title[i];
+    }
+    *lp_console_title.add(copy_len) = 0;
+    copy_len as u32
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetConsoleTitleA(lp_console_title: *mut u8, n_size: u32) -> u32 {
+    if lp_console_title.is_null() || n_size == 0 {
+        return 0;
+    }
+    let title = b"Rine Console";
+    let max_chars = (n_size as usize).saturating_sub(1);
+    let copy_len = title.len().min(max_chars);
+    std::ptr::copy_nonoverlapping(title.as_ptr(), lp_console_title, copy_len);
+    *lp_console_title.add(copy_len) = 0;
+    copy_len as u32
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetConsoleTitleW(_lp_console_title: *const u16) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetConsoleTitleA(_lp_console_title: *const u8) -> i32 {
+    1
+}
+
+/// APPMODEL_ERROR_NO_PACKAGE (15700): process has no package identity.
+#[no_mangle]
+pub unsafe extern "win64" fn GetPackageFamilyName(
+    _h_process: usize,
+    package_family_name_length: *mut u32,
+    _package_family_name: *mut u16,
+) -> u32 {
+    if !package_family_name_length.is_null() {
+        *package_family_name_length = 0;
+    }
+    15700 // APPMODEL_ERROR_NO_PACKAGE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetCurrentPackageFamilyName(
+    package_family_name_length: *mut u32,
+    _package_family_name: *mut u16,
+) -> u32 {
+    if !package_family_name_length.is_null() {
+        *package_family_name_length = 0;
+    }
+    15700 // APPMODEL_ERROR_NO_PACKAGE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetPackageFullName(
+    _h_process: usize,
+    package_full_name_length: *mut u32,
+    _package_full_name: *mut u16,
+) -> u32 {
+    if !package_full_name_length.is_null() {
+        *package_full_name_length = 0;
+    }
+    15700 // APPMODEL_ERROR_NO_PACKAGE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetCurrentPackageFullName(
+    package_full_name_length: *mut u32,
+    _package_full_name: *mut u16,
+) -> u32 {
+    if !package_full_name_length.is_null() {
+        *package_full_name_length = 0;
+    }
+    15700 // APPMODEL_ERROR_NO_PACKAGE
+}
+
+static NEXT_WAIT_OBJ_HANDLE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0x9001);
+
+#[no_mangle]
+pub unsafe extern "win64" fn RegisterWaitForSingleObject(
+    ph_new_wait_object: *mut usize,
+    _h_object: usize,
+    _callback: usize,
+    _context: usize,
+    _dw_milliseconds: u32,
+    _dw_flags: u32,
+) -> i32 {
+    if !ph_new_wait_object.is_null() {
+        *ph_new_wait_object =
+            NEXT_WAIT_OBJ_HANDLE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn UnregisterWait(_wait_handle: usize) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn UnregisterWaitEx(
+    _wait_handle: usize,
+    _completion_event: usize,
+) -> i32 {
+    1
+}
+
+#[repr(C)]
+pub struct OverlappedEntry {
+    pub lp_completion_key: usize,
+    pub lp_overlapped: usize,
+    pub internal: usize,
+    pub dw_number_of_bytes_transferred: u32,
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetQueuedCompletionStatusEx(
+    completion_port: u64,
+    lp_completion_port_entries: *mut OverlappedEntry,
+    ul_count: u32,
+    ul_num_entries_removed: *mut u32,
+    dw_milliseconds: u32,
+    _f_alertable: i32,
+) -> i32 {
+    if lp_completion_port_entries.is_null() || ul_count == 0 || ul_num_entries_removed.is_null() {
+        SetLastError(87);
+        return 0;
+    }
+    let mut bytes = 0u32;
+    let mut key = 0usize;
+    let mut ov = 0usize;
+    let ok = GetQueuedCompletionStatus(completion_port, &mut bytes, &mut key, &mut ov, dw_milliseconds);
+    if ok != 0 {
+        *lp_completion_port_entries = OverlappedEntry {
+            lp_completion_key: key,
+            lp_overlapped: ov,
+            internal: 0,
+            dw_number_of_bytes_transferred: bytes,
+        };
+        *ul_num_entries_removed = 1;
+        1
+    } else {
+        *ul_num_entries_removed = 0;
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn QueueUserWorkItem(
+    function: usize,
+    context: usize,
+    _flags: u32,
+) -> i32 {
+    if function == 0 {
+        SetLastError(87);
+        return 0;
+    }
+    let mut tid: u32 = 0;
+    let handle = CreateThread(std::ptr::null_mut(), 0, function as u64, context as u64, 0, &mut tid);
+    if handle != 0 {
+        CloseHandle(handle);
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetConsoleCtrlHandler(handler_routine: usize, add: i32) -> i32 {
+    if let Ok(mut list) = CONSOLE_CTRL_HANDLERS.lock() {
+        if add != 0 {
+            if handler_routine != 0 && !list.contains(&handler_routine) {
+                list.push(handler_routine);
+            }
+        } else if handler_routine != 0 {
+            list.retain(|&h| h != handler_routine);
+        }
+    }
+    1 // TRUE
+}
+
 #[no_mangle]
 pub unsafe extern "win64" fn GetSystemTimePreciseAsFileTime(lp_system_time_as_file_time: *mut u64) {
     GetSystemTimeAsFileTime(lp_system_time_as_file_time);
@@ -3016,6 +3493,19 @@ pub unsafe extern "win64" fn InitializeCriticalSectionEx(
     _flags: u32,
 ) -> i32 {
     InitializeCriticalSectionAndSpinCount(cs, spin)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetCriticalSectionSpinCount(
+    cs: *mut RtlCriticalSection,
+    spin: u32,
+) -> u32 {
+    if cs.is_null() {
+        return 0;
+    }
+    let prev = (*cs).spin_count as u32;
+    (*cs).spin_count = spin as usize;
+    prev
 }
 
 static CS_REGISTRY: std::sync::LazyLock<
@@ -4347,9 +4837,6 @@ fn normalize_module_name(raw_name: &str) -> String {
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| raw_name.to_string());
 
-    while file_name.to_ascii_lowercase().ends_with(".dll.dll") {
-        file_name.truncate(file_name.len() - 4);
-    }
     if file_name.to_ascii_lowercase().ends_with(".cpl.dll") {
         file_name.truncate(file_name.len() - 4);
     }
@@ -4471,6 +4958,20 @@ fn get_known_native_base(name: &str) -> Option<usize> {
         }
     } else if lower == "winhttp.dll" || lower == "winhttp" {
         Some(0x7FDF0000)
+    } else if lower == "comctl32.dll" || lower == "comctl32" {
+        Some(0x7FDE0000)
+    } else if lower == "dbghelp.dll" || lower == "dbghelp" {
+        Some(0x7FDD0000)
+    } else if lower == "mmdevapi.dll" || lower == "mmdevapi" {
+        Some(0x7FDC0000)
+    } else if lower == "mf.dll" || lower == "mf" {
+        Some(0x7FDB0000)
+    } else if lower == "mfplat.dll" || lower == "mfplat" {
+        Some(0x7FDA0000)
+    } else if lower == "mfreadwrite.dll" || lower == "mfreadwrite" {
+        Some(0x7FD90000)
+    } else if lower == "mfplay.dll" || lower == "mfplay" {
+        Some(0x7FD80000)
     } else {
         None
     }
@@ -4537,11 +5038,7 @@ impl ModuleRegistry {
 
         // 3c. Try loading companion DLL from disk
         drop(guard);
-        let mut clean_raw = raw_name.to_string();
-        while clean_raw.to_ascii_lowercase().ends_with(".dll.dll") {
-            clean_raw.truncate(clean_raw.len() - 4);
-        }
-        if let Some(base) = crate::mem::loader::LoadedModule::load_companion_dll(&clean_raw) {
+        if let Some(base) = crate::mem::loader::LoadedModule::load_companion_dll(raw_name) {
             let mut guard = MODULE_TABLE.lock().unwrap();
             let table = guard.get_or_insert_with(Vec::new);
             table.push(RegisteredModule {
@@ -4684,6 +5181,9 @@ impl ModuleRegistry {
             0x7FE18000 => Some("steamclient64.dll".to_string()),
             0x7FE00000 => Some("steam_api64.dll".to_string()),
             0x7FDF0000 => Some("winhttp.dll".to_string()),
+            0x7FDE0000 => Some("comctl32.dll".to_string()),
+            0x7FDD0000 => Some("dbghelp.dll".to_string()),
+            0x7FDC0000 => Some("mmdevapi.dll".to_string()),
             _ => None,
         }
     }
@@ -5373,6 +5873,105 @@ pub unsafe fn get_teb_ptr() -> *mut crate::pe::teb::Teb64 {
     std::ptr::null_mut()
 }
 
+fn allocate_and_init_teb(
+    pid: u64,
+    tid: u64,
+    stack_limit: u64,
+    stack_base: u64,
+    peb_address: u64,
+) -> u64 {
+    // Allocate full TEB block with PROT_NONE guard pages on both ends
+    let teb_size = 65536usize;
+    let alloc_size = teb_size + 0x2000;
+    let raw_mem = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            alloc_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert!(
+        raw_mem != libc::MAP_FAILED && !raw_mem.is_null(),
+        "Failed to allocate worker TEB memory"
+    );
+    unsafe {
+        libc::mprotect(raw_mem, 0x1000, libc::PROT_NONE);
+        libc::mprotect(
+            (raw_mem as *mut u8).add(alloc_size - 0x1000) as *mut libc::c_void,
+            0x1000,
+            libc::PROT_NONE,
+        );
+    }
+    let teb_mem = unsafe { (raw_mem as *mut u8).add(0x1000) as *mut libc::c_void };
+    unsafe {
+        std::ptr::write_bytes(teb_mem as *mut u8, 0, teb_size);
+    }
+
+    let teb_ptr = teb_mem as u64;
+    let tls_array_addr = teb_ptr + 0x200; // TLS slots at offset 0x200
+
+    let teb_struct = crate::pe::teb::Teb64 {
+        tib: crate::pe::teb::NtTib64 {
+            exception_list: 0,
+            stack_base,
+            stack_limit,
+            sub_system_tib: 0,
+            fiber_data: 0,
+            arbitrary_user_pointer: 0,
+            self_ptr: teb_ptr,
+        },
+        environment_pointer: 0,
+        client_id: crate::pe::teb::ClientId64 {
+            unique_process: pid,
+            unique_thread: tid,
+        },
+        active_rpc_handle: 0,
+        thread_local_storage_pointer: tls_array_addr,
+        peb: peb_address,
+        last_error_value: 0,
+        count_of_owned_critical_sections: 0,
+        cs_client_thread: 0,
+        win32_thread_info: 0,
+    };
+
+    unsafe {
+        std::ptr::write(teb_mem as *mut crate::pe::teb::Teb64, teb_struct);
+    }
+
+    // Set GS base for this worker thread
+    let _ = crate::sys::trampoline::set_thread_teb_gs_base(teb_ptr);
+
+    // Initialize worker thread TLS templates
+    crate::mem::loader::init_thread_tls(tls_array_addr);
+
+    teb_ptr
+}
+
+/// Ensure the current OS thread has a valid Windows `Teb64` (`%gs` base) and
+/// initialized guest TLS slots before invoking guest Win64 callbacks.
+pub fn ensure_current_thread_teb() {
+    let cached = CACHED_TEB_PTR.with(|c| c.get());
+    if !cached.is_null() && (cached as usize) >= 0x10000 {
+        return;
+    }
+    let mut gs_base: u64 = 0;
+    if unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1004, &raw mut gs_base) } == 0
+        && gs_base >= 0x10000
+    {
+        CACHED_TEB_PTR.with(|c| c.set(gs_base as *mut crate::pe::teb::Teb64));
+        return;
+    }
+
+    let pid = unsafe { libc::getpid() } as u64;
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u64;
+    let (stack_limit, stack_base) = crate::sys::get_current_thread_stack_bounds();
+    let peb_address = CURRENT_PEB_ADDRESS.load(std::sync::atomic::Ordering::SeqCst);
+    allocate_and_init_teb(pid, tid, stack_limit, stack_base, peb_address);
+}
+
 pub unsafe extern "win64" fn TlsGetValue(dw_tls_index: u32) -> usize {
     let teb = get_teb_ptr();
     if !teb.is_null() && (teb as usize) >= 0x10000 {
@@ -5901,23 +6500,32 @@ pub unsafe extern "win64" fn CreateFileW(
             _ => 2,
         };
         SetLastError(win_err);
-        println!(
-            "[KERNEL32] CreateFileW FAILED: '{}' -> '{}' (flags=0x{:X}, errno={})",
-            win_path, linux_path, flags, err
-        );
+        if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+            println!(
+                "[KERNEL32] CreateFileW FAILED: '{}' -> '{}' (flags=0x{:X}, errno={})",
+                win_path, linux_path, flags, err
+            );
+        }
         return INVALID_HANDLE_VALUE;
     }
 
     register_fd_handle(fd as u64);
+    if dw_desired_access == GENERIC_READ || (dw_desired_access & GENERIC_READ) != 0 {
+        // Trigger asynchronous Linux kernel readahead for streamed game assets
+        libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        libc::posix_fadvise(fd, 0, 8 * 1024 * 1024, libc::POSIX_FADV_WILLNEED);
+    }
     if file_existed_before && (dw_creation_disposition == CREATE_ALWAYS || dw_creation_disposition == OPEN_ALWAYS) {
         SetLastError(183); // ERROR_ALREADY_EXISTS
     } else {
         SetLastError(0);
     }
-    println!(
-        "[KERNEL32] CreateFileW SUCCEEDED: '{}' -> '{}' (fd={}, access=0x{:X}, disp={}, share=0x{:X}, flags=0x{:X})",
-        win_path, linux_path, fd, dw_desired_access, dw_creation_disposition, _dw_share_mode, dw_flags_and_attributes
-    );
+    if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+        println!(
+            "[KERNEL32] CreateFileW SUCCEEDED: '{}' -> '{}' (fd={}, access=0x{:X}, disp={}, share=0x{:X}, flags=0x{:X})",
+            win_path, linux_path, fd, dw_desired_access, dw_creation_disposition, _dw_share_mode, dw_flags_and_attributes
+        );
+    }
     fd as *mut std::ffi::c_void
 }
 
@@ -5982,10 +6590,14 @@ pub unsafe extern "win64" fn GetFileAttributesW(lp_file_name: *const u16) -> u32
         if attr == 0 {
             attr = FILE_ATTRIBUTE_NORMAL;
         }
-        println!("[KERNEL32] GetFileAttributesW('{}' -> '{}') -> 0x{:X}", win_path, host_path, attr);
+        if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+            println!("[KERNEL32] GetFileAttributesW('{}' -> '{}') -> 0x{:X}", win_path, host_path, attr);
+        }
         attr
     } else {
-        println!("[KERNEL32] GetFileAttributesW('{}' -> '{}') -> NOT FOUND", win_path, host_path);
+        if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+            println!("[KERNEL32] GetFileAttributesW('{}' -> '{}') -> NOT FOUND", win_path, host_path);
+        }
         SetLastError(2);
         INVALID_FILE_ATTRIBUTES
     }
@@ -6252,10 +6864,16 @@ pub unsafe extern "win64" fn MapViewOfFileEx(
         return std::ptr::null_mut();
     }
 
-    println!(
-        "[KERNEL32] MapViewOfFile SUCCEEDED: handle=0x{:X}, ptr={:p}, len={}, offset={}",
-        handle, ptr, map_len, offset
-    );
+    if !mapping.is_anonymous && mapping.fd >= 0 {
+        libc::madvise(ptr, map_len, libc::MADV_SEQUENTIAL);
+        libc::madvise(ptr, map_len.min(8 * 1024 * 1024), libc::MADV_WILLNEED);
+    }
+    if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+        println!(
+            "[KERNEL32] MapViewOfFile SUCCEEDED: handle=0x{:X}, ptr={:p}, len={}, offset={}",
+            handle, ptr, map_len, offset
+        );
+    }
 
     let mut views = MAPPED_VIEWS.lock().unwrap();
     views.get_or_insert_with(HashMap::new).insert(ptr as usize, (map_len, mapping.is_anonymous));
@@ -6275,7 +6893,10 @@ pub unsafe extern "win64" fn UnmapViewOfFile(lp_base_address: *const std::ffi::c
         views.as_mut().and_then(|m| m.remove(&addr))
     };
 
-    if let Some((len, _)) = view_info {
+    if let Some((len, is_anonymous)) = view_info {
+        if !is_anonymous {
+            libc::madvise(lp_base_address as *mut libc::c_void, len, libc::MADV_DONTNEED);
+        }
         libc::munmap(lp_base_address as *mut libc::c_void, len);
         1
     } else {
@@ -6547,6 +7168,12 @@ pub unsafe extern "win64" fn GetFileInformationByHandle(
             (*lp_file_information).nFileIndexHigh = (ino >> 32) as u32;
             (*lp_file_information).nFileIndexLow = (ino & 0xFFFFFFFF) as u32;
 
+            if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+                println!(
+                    "[KERNEL32] GetFileInformationByHandle(fd={}) -> attr=0x{:X}, size={}",
+                    fd, attr, size
+                );
+            }
             SetLastError(0);
             return 1;
         }
@@ -6567,23 +7194,107 @@ pub unsafe extern "win64" fn GetFileInformationByHandleEx(
         return 0;
     }
     let fd = h_file as i64 as i32;
+    if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+        println!(
+            "[KERNEL32] GetFileInformationByHandleEx(fd={}, class={}, size={})",
+            fd, file_information_class, dw_buffer_size
+        );
+    }
     if fd >= 0 && is_fd_handle(fd as u64) {
         let mut st: libc::stat = std::mem::zeroed();
         if libc::fstat(fd, &mut st) == 0 {
-            if file_information_class == 1 && dw_buffer_size >= 24 {
-                let size = st.st_size as u64;
-                let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
-                let buf = lp_file_information as *mut u64;
-                *buf = size;
-                *buf.add(1) = size;
-                let links_ptr = buf.add(2) as *mut u32;
-                *links_ptr = st.st_nlink as u32;
-                let dir_ptr = links_ptr.add(1) as *mut u8;
-                *dir_ptr = 0;
-                *dir_ptr.add(1) = if is_dir { 1 } else { 0 };
-                return 1;
+            let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+            let attr: u32 = if is_dir { 0x10 } else { 0x20 };
+            let mtime_100ns = (st.st_mtime as i64 + 11644473600) * 10_000_000;
+            match file_information_class {
+                0 => {
+                    // FileBasicInfo (40 bytes)
+                    if dw_buffer_size < 40 {
+                        SetLastError(122); // ERROR_INSUFFICIENT_BUFFER
+                        return 0;
+                    }
+                    std::ptr::write_bytes(lp_file_information, 0, 40);
+                    let qwords = lp_file_information as *mut i64;
+                    *qwords.add(0) = mtime_100ns; // CreationTime
+                    *qwords.add(1) = mtime_100ns; // LastAccessTime
+                    *qwords.add(2) = mtime_100ns; // LastWriteTime
+                    *qwords.add(3) = mtime_100ns; // ChangeTime
+                    *(lp_file_information.add(32) as *mut u32) = attr;
+                    SetLastError(0);
+                    return 1;
+                }
+                1 => {
+                    // FileStandardInfo (24 bytes)
+                    if dw_buffer_size < 24 {
+                        SetLastError(122);
+                        return 0;
+                    }
+                    let size = st.st_size as u64;
+                    let buf = lp_file_information as *mut u64;
+                    *buf = (size + 4095) & !4095;
+                    *buf.add(1) = size;
+                    let links_ptr = buf.add(2) as *mut u32;
+                    *links_ptr = st.st_nlink as u32;
+                    let dir_ptr = links_ptr.add(1) as *mut u8;
+                    *dir_ptr = 0;
+                    *dir_ptr.add(1) = if is_dir { 1 } else { 0 };
+                    SetLastError(0);
+                    return 1;
+                }
+                2 => {
+                    // FileNameInfo (4 + WCHAR[])
+                    if dw_buffer_size < 4 {
+                        SetLastError(122);
+                        return 0;
+                    }
+                    let path = std::fs::read_link(format!("/proc/self/fd/{}", fd))
+                        .map(|p| p.to_string_lossy().replace('/', "\\"))
+                        .unwrap_or_else(|_| "\\unknown".to_string());
+                    let utf16: Vec<u16> = path.encode_utf16().collect();
+                    let byte_len = utf16.len() * 2;
+                    *(lp_file_information as *mut u32) = byte_len as u32;
+                    let avail_chars = (dw_buffer_size as usize - 4) / 2;
+                    let copy_chars = utf16.len().min(avail_chars);
+                    let dst = lp_file_information.add(4) as *mut u16;
+                    for i in 0..copy_chars {
+                        *dst.add(i) = utf16[i];
+                    }
+                    if utf16.len() > avail_chars {
+                        SetLastError(234); // ERROR_MORE_DATA
+                        return 0;
+                    }
+                    SetLastError(0);
+                    return 1;
+                }
+                9 => {
+                    // FileAttributeTagInfo (8 bytes)
+                    if dw_buffer_size < 8 {
+                        SetLastError(122);
+                        return 0;
+                    }
+                    *(lp_file_information as *mut u32) = attr;
+                    *(lp_file_information.add(4) as *mut u32) = 0; // ReparseTag
+                    SetLastError(0);
+                    return 1;
+                }
+                18 => {
+                    // FileIdInfo (24 bytes)
+                    if dw_buffer_size < 24 {
+                        SetLastError(122);
+                        return 0;
+                    }
+                    std::ptr::write_bytes(lp_file_information, 0, 24);
+                    *(lp_file_information as *mut u64) = 0x12345678;
+                    *(lp_file_information.add(8) as *mut u64) = st.st_ino as u64;
+                    SetLastError(0);
+                    return 1;
+                }
+                _ => {
+                    std::ptr::write_bytes(lp_file_information, 0, dw_buffer_size as usize);
+                    SetLastError(0);
+                    return 1;
+                }
             }
-            return 1;
         }
     }
     SetLastError(6);
@@ -6850,6 +7561,38 @@ fn is_fd_handle(handle: u64) -> bool {
     g.as_ref().map(|s| s.contains(&handle)).unwrap_or(false)
 }
 
+/// Evict clean file-backed page cache & mmap pages in Hybrid mode to preserve system RAM headroom.
+pub fn trim_hybrid_file_caches() {
+    let views_snapshot: Vec<(usize, usize)> = {
+        let g = MAPPED_VIEWS.lock().unwrap();
+        g.as_ref()
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, (_, is_anon))| !*is_anon)
+                    .map(|(&addr, &(len, _))| (addr, len))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for (addr, len) in views_snapshot {
+        unsafe {
+            libc::madvise(addr as *mut libc::c_void, len, libc::MADV_DONTNEED);
+        }
+    }
+
+    let fds_snapshot: Vec<i32> = {
+        let g = FD_TABLE.lock().unwrap();
+        g.as_ref()
+            .map(|s| s.iter().filter(|&&fd| fd > 2).map(|&fd| fd as i32).collect())
+            .unwrap_or_default()
+    };
+    for fd in fds_snapshot {
+        unsafe {
+            libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED);
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "win64" fn ReadFile(
     h_file: *mut std::ffi::c_void,
@@ -6921,6 +7664,17 @@ pub unsafe extern "win64" fn ReadFile(
                 }
                 read_err = true;
                 break;
+            }
+        }
+
+        if total_read >= 64 * 1024 {
+            let next_off = if use_pread {
+                base_offset + total_read as i64
+            } else {
+                libc::lseek(fd, 0, libc::SEEK_CUR)
+            };
+            if next_off >= 0 {
+                libc::posix_fadvise(fd, next_off, 4 * 1024 * 1024, libc::POSIX_FADV_WILLNEED);
             }
         }
 
@@ -8536,20 +9290,138 @@ pub unsafe extern "win64" fn PowerClearRequest(power_request: u64, request_type:
     0
 }
 
+unsafe fn rsrc_match_entry(rsrc_base: usize, dir_offset: usize, target: u64, is_ansi: bool) -> Option<u32> {
+    if dir_offset == 0 && target == 0 {
+        // Only root is at offset 0
+    }
+    let dir = (rsrc_base + dir_offset) as *const u8;
+    let num_named = *(dir.add(12) as *const u16) as usize;
+    let num_id = *(dir.add(14) as *const u16) as usize;
+    let total = num_named + num_id;
+    let entries = dir.add(16) as *const u32;
+
+    if target < 0x10000 {
+        let want_id = target as u32;
+        for i in num_named..total {
+            let name_or_id = *entries.add(i * 2);
+            let offset_to_data = *entries.add(i * 2 + 1);
+            if name_or_id == want_id {
+                return Some(offset_to_data);
+            }
+        }
+    } else {
+        let target_u16: Vec<u16> = if is_ansi {
+            let s = std::ffi::CStr::from_ptr(target as *const i8).to_string_lossy();
+            s.encode_utf16().collect()
+        } else {
+            let p = target as *const u16;
+            let mut v = Vec::new();
+            let mut idx = 0;
+            while *p.add(idx) != 0 && idx < 512 {
+                v.push(*p.add(idx));
+                idx += 1;
+            }
+            v
+        };
+        for i in 0..num_named {
+            let name_or_id = *entries.add(i * 2);
+            let offset_to_data = *entries.add(i * 2 + 1);
+            if (name_or_id & 0x8000_0000) != 0 {
+                let str_ptr = (rsrc_base + (name_or_id & 0x7FFF_FFFF) as usize) as *const u16;
+                let len = *str_ptr as usize;
+                if len == target_u16.len() {
+                    let slice = std::slice::from_raw_parts(str_ptr.add(1), len);
+                    if slice.iter().zip(target_u16.iter()).all(|(&a, &b)| {
+                        let ca = char::from_u32(a as u32).map(|c| c.to_ascii_uppercase());
+                        let cb = char::from_u32(b as u32).map(|c| c.to_ascii_uppercase());
+                        ca == cb
+                    }) {
+                        return Some(offset_to_data);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+unsafe fn find_resource_impl(module: u64, name: u64, rtype: u64, is_ansi: bool) -> u64 {
+    let base = if module == 0 {
+        CURRENT_IMAGE_BASE.load(std::sync::atomic::Ordering::SeqCst) as usize
+    } else {
+        module as usize
+    };
+    if base < 0x10000 {
+        return 0;
+    }
+    let dos = base as *const u8;
+    if *(dos as *const u16) != 0x5A4D {
+        return 0;
+    }
+    let e_lfanew = *(dos.add(0x3C) as *const u32) as usize;
+    let nt = dos.add(e_lfanew);
+    if *(nt as *const u32) != 0x0000_4550 {
+        return 0;
+    }
+    let opt = nt.add(24);
+    let magic = *(opt as *const u16);
+    let dd_offset = if magic == 0x20B { 112 } else if magic == 0x10B { 96 } else { return 0; };
+    let rsrc_rva = *(opt.add(dd_offset + 2 * 8) as *const u32) as usize;
+    let rsrc_size = *(opt.add(dd_offset + 2 * 8 + 4) as *const u32) as usize;
+    if rsrc_rva == 0 || rsrc_size == 0 {
+        return 0;
+    }
+    let rsrc_base = base + rsrc_rva;
+
+    let Some(type_off) = rsrc_match_entry(rsrc_base, 0, rtype, is_ansi) else {
+        return 0;
+    };
+    if (type_off & 0x8000_0000) == 0 {
+        return 0;
+    }
+    let Some(name_off) = rsrc_match_entry(rsrc_base, (type_off & 0x7FFF_FFFF) as usize, name, is_ansi) else {
+        return 0;
+    };
+    if (name_off & 0x8000_0000) == 0 {
+        return 0;
+    }
+    // Language directory: pick first entry
+    let lang_dir = (rsrc_base + (name_off & 0x7FFF_FFFF) as usize) as *const u8;
+    let num_named = *(lang_dir.add(12) as *const u16) as usize;
+    let num_id = *(lang_dir.add(14) as *const u16) as usize;
+    if num_named + num_id == 0 {
+        return 0;
+    }
+    let first_data_off = *((lang_dir.add(16) as *const u32).add(1));
+    if (first_data_off & 0x8000_0000) != 0 {
+        return 0;
+    }
+    // Return pointer to IMAGE_RESOURCE_DATA_ENTRY (encode module base via high/lookup? Wait: LoadResource receives module!)
+    (rsrc_base + first_data_off as usize) as u64
+}
+
 #[no_mangle]
-pub unsafe extern "win64" fn FindResourceW(_module: u64, _name: u64, _type: u64) -> u64 {
-    let base = CURRENT_IMAGE_BASE.load(std::sync::atomic::Ordering::SeqCst);
-    base + 0x043A9000
+pub unsafe extern "win64" fn FindResourceW(module: u64, name: u64, rtype: u64) -> u64 {
+    find_resource_impl(module, name, rtype, false)
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn FindResourceA(module: u64, name: u64, rtype: u64) -> u64 {
-    FindResourceW(module, name, rtype)
+    find_resource_impl(module, name, rtype, true)
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn LoadResource(_module: u64, resource_handle: u64) -> u64 {
-    resource_handle
+pub unsafe extern "win64" fn LoadResource(module: u64, resource_handle: u64) -> u64 {
+    if resource_handle < 0x10000 {
+        return 0;
+    }
+    let base = if module == 0 {
+        CURRENT_IMAGE_BASE.load(std::sync::atomic::Ordering::SeqCst)
+    } else {
+        module
+    };
+    let rva = *(resource_handle as *const u32) as u64;
+    if rva == 0 { 0 } else { base + rva }
 }
 
 #[no_mangle]
@@ -8558,8 +9430,11 @@ pub unsafe extern "win64" fn LockResource(resource_data_handle: u64) -> u64 {
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn SizeofResource(_module: u64, _resource_handle: u64) -> u32 {
-    4096
+pub unsafe extern "win64" fn SizeofResource(_module: u64, resource_handle: u64) -> u32 {
+    if resource_handle < 0x10000 {
+        return 0;
+    }
+    *((resource_handle as *const u32).add(1))
 }
 
 pub struct ThreadEntry {
@@ -8590,6 +9465,7 @@ pub struct ThreadEntry {
     pub suspended_sync: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     pub suspend_count: AtomicI32,
     pub suspend_ack: AtomicBool,
+    pub context_dirty: AtomicBool,
 }
 
 pub fn on_thread_suspended_signal(
@@ -8610,7 +9486,7 @@ pub fn on_thread_suspended_signal(
     r13: u64,
     r14: u64,
     r15: u64,
-) {
+) -> Option<[u64; 17]> {
     let my_host_tid = unsafe { libc::syscall(libc::SYS_gettid) } as u64;
     CURRENT_THREAD_ENTRY.with(|cell| {
         let entry_opt = cell.try_borrow().ok().and_then(|b| b.clone()).or_else(|| {
@@ -8664,8 +9540,30 @@ pub fn on_thread_suspended_signal(
             }
             entry.suspend_ack.store(false, Ordering::SeqCst);
             crate::sys::diagnostics::record_thread_state(crate::sys::diagnostics::ThreadExecutionState::Running);
+            if entry.context_dirty.swap(false, Ordering::SeqCst) {
+                return Some([
+                    entry.last_rsp.load(Ordering::SeqCst),
+                    entry.last_rbp.load(Ordering::SeqCst),
+                    entry.last_rip.load(Ordering::SeqCst),
+                    entry.last_rax.load(Ordering::SeqCst),
+                    entry.last_rbx.load(Ordering::SeqCst),
+                    entry.last_rcx.load(Ordering::SeqCst),
+                    entry.last_rdx.load(Ordering::SeqCst),
+                    entry.last_rsi.load(Ordering::SeqCst),
+                    entry.last_rdi.load(Ordering::SeqCst),
+                    entry.last_r8.load(Ordering::SeqCst),
+                    entry.last_r9.load(Ordering::SeqCst),
+                    entry.last_r10.load(Ordering::SeqCst),
+                    entry.last_r11.load(Ordering::SeqCst),
+                    entry.last_r12.load(Ordering::SeqCst),
+                    entry.last_r13.load(Ordering::SeqCst),
+                    entry.last_r14.load(Ordering::SeqCst),
+                    entry.last_r15.load(Ordering::SeqCst),
+                ]);
+            }
         }
-    });
+        None
+    })
 }
 
 #[inline(always)]
@@ -8782,6 +9680,7 @@ pub fn ensure_main_thread_entry() -> std::sync::Arc<ThreadEntry> {
                 suspended_sync,
                 suspend_count: AtomicI32::new(0),
                 suspend_ack: AtomicBool::new(false),
+                context_dirty: AtomicBool::new(false),
             });
             table.insert(main_handle, new_entry.clone());
             if host_tid as u32 != pid {
@@ -8886,6 +9785,7 @@ pub unsafe extern "win64" fn CreateThread(
         suspended_sync,
         suspend_count: AtomicI32::new(if is_suspended { 1 } else { 0 }),
         suspend_ack: AtomicBool::new(false),
+        context_dirty: AtomicBool::new(false),
     });
 
     {
@@ -8932,72 +9832,7 @@ pub unsafe extern "win64" fn CreateThread(
             thread_entry_worker.stack_base.store(stack_base, Ordering::SeqCst);
             thread_entry_worker.stack_limit.store(stack_limit, Ordering::SeqCst);
 
-            // Allocate full TEB block with PROT_NONE guard pages on both ends
-            let teb_size = 65536usize;
-            let alloc_size = teb_size + 0x2000;
-            let raw_mem = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    alloc_size,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1,
-                    0,
-                )
-            };
-            assert!(
-                raw_mem != libc::MAP_FAILED && !raw_mem.is_null(),
-                "Failed to allocate worker TEB memory"
-            );
-            unsafe {
-                libc::mprotect(raw_mem, 0x1000, libc::PROT_NONE);
-                libc::mprotect(
-                    (raw_mem as *mut u8).add(alloc_size - 0x1000) as *mut libc::c_void,
-                    0x1000,
-                    libc::PROT_NONE,
-                );
-            }
-            let teb_mem = unsafe { (raw_mem as *mut u8).add(0x1000) as *mut libc::c_void };
-            unsafe {
-                std::ptr::write_bytes(teb_mem as *mut u8, 0, teb_size);
-            }
-
-            let teb_ptr = teb_mem as u64;
-            let tls_array_addr = teb_ptr + 0x200; // TLS slots at offset 0x200
-
-            let teb_struct = crate::pe::teb::Teb64 {
-                tib: crate::pe::teb::NtTib64 {
-                    exception_list: 0,
-                    stack_base: stack_base,
-                    stack_limit: stack_limit,
-                    sub_system_tib: 0,
-                    fiber_data: 0,
-                    arbitrary_user_pointer: 0,
-                    self_ptr: teb_ptr,
-                },
-                environment_pointer: 0,
-                client_id: crate::pe::teb::ClientId64 {
-                    unique_process: pid,
-                    unique_thread: tid,
-                },
-                active_rpc_handle: 0,
-                thread_local_storage_pointer: tls_array_addr,
-                peb: peb_address,
-                last_error_value: 0,
-                count_of_owned_critical_sections: 0,
-                cs_client_thread: 0,
-                win32_thread_info: 0,
-            };
-
-            unsafe {
-                std::ptr::write(teb_mem as *mut crate::pe::teb::Teb64, teb_struct);
-            }
-
-            // Set GS base for this worker thread
-            let _ = crate::sys::trampoline::set_thread_teb_gs_base(teb_ptr);
-
-            // Initialize worker thread TLS templates
-            crate::mem::loader::init_thread_tls(tls_array_addr);
+            let teb_ptr = allocate_and_init_teb(pid, tid, stack_limit, stack_base, peb_address);
 
             // Read back GS base to verify
             let mut gs_base: u64 = 0;
@@ -9062,7 +9897,6 @@ pub unsafe extern "win64" fn CreateThread(
 
 #[no_mangle]
 pub unsafe extern "win64" fn WaitForSingleObject(h_handle: u64, dw_milliseconds: u32) -> u32 {
-    update_current_thread_stack_context();
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 0x102;
     const WAIT_FAILED: u32 = 0xFFFFFFFF;
@@ -9646,6 +10480,9 @@ pub unsafe extern "win64" fn CloseHandle(h_object: u64) -> i32 {
         if let Some(table) = g.as_mut() {
             table.remove(&h_object);
         }
+        if crate::mem::strategy::get_available_ram_bytes() < 3 * 1024 * 1024 * 1024 + 512 * 1024 * 1024 {
+            libc::posix_fadvise(h_object as i32, 0, 0, libc::POSIX_FADV_DONTNEED);
+        }
         libc::close(h_object as i32);
     }
     1
@@ -10181,6 +11018,70 @@ pub unsafe extern "win64" fn HeapSetInformation(
     1
 }
 
+pub unsafe extern "win64" fn SetConsoleScreenBufferSize(_h_console: usize, _dw_size: u32) -> i32 {
+    1
+}
+
+pub unsafe extern "win64" fn SetConsoleWindowInfo(
+    _h_console: usize,
+    _b_absolute: i32,
+    _lp_console_window: *const libc::c_void,
+) -> i32 {
+    1
+}
+
+pub unsafe extern "win64" fn ReadConsoleA(
+    _h_console: usize,
+    _lp_buffer: *mut libc::c_void,
+    _n_chars: u32,
+    lp_chars_read: *mut u32,
+    _p_input_control: *const libc::c_void,
+) -> i32 {
+    if !lp_chars_read.is_null() {
+        *lp_chars_read = 0;
+    }
+    1
+}
+
+pub unsafe extern "win64" fn CompareStringOrdinal(
+    lp_string1: *const u16,
+    cch_count1: i32,
+    lp_string2: *const u16,
+    cch_count2: i32,
+    b_ignore_case: i32,
+) -> i32 {
+    let read_u16 = |p: *const u16, cch: i32| -> Vec<u16> {
+        if p.is_null() {
+            return Vec::new();
+        }
+        if cch < 0 {
+            let mut v = Vec::new();
+            let mut i = 0;
+            while *p.add(i) != 0 {
+                v.push(*p.add(i));
+                i += 1;
+            }
+            v
+        } else {
+            std::slice::from_raw_parts(p, cch as usize).to_vec()
+        }
+    };
+    let s1 = read_u16(lp_string1, cch_count1);
+    let s2 = read_u16(lp_string2, cch_count2);
+    let ord = if b_ignore_case != 0 {
+        let a: Vec<u16> = s1.iter().map(|&c| char::from_u32(c as u32).map(|ch| ch.to_ascii_uppercase() as u16).unwrap_or(c)).collect();
+        let b: Vec<u16> = s2.iter().map(|&c| char::from_u32(c as u32).map(|ch| ch.to_ascii_uppercase() as u16).unwrap_or(c)).collect();
+        a.cmp(&b)
+    } else {
+        s1.cmp(&s2)
+    };
+    match ord {
+        std::cmp::Ordering::Less => 1,    // CSTR_LESS_THAN
+        std::cmp::Ordering::Equal => 2,   // CSTR_EQUAL
+        std::cmp::Ordering::Greater => 3, // CSTR_GREATER_THAN
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "win64" fn GetDriveTypeA(_lp_root_path_name: *const libc::c_char) -> u32 {
     3 // DRIVE_FIXED
@@ -10235,6 +11136,123 @@ pub unsafe extern "win64" fn ExpandEnvironmentStringsW(
     }
     *lp_dst.add(expanded.len()) = 0;
     needed
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn ExpandEnvironmentStringsA(
+    lp_src: *const u8,
+    lp_dst: *mut u8,
+    n_size: u32,
+) -> u32 {
+    if lp_src.is_null() {
+        return 0;
+    }
+    let src_str = std::ffi::CStr::from_ptr(lp_src as *const libc::c_char)
+        .to_string_lossy()
+        .into_owned();
+    let expanded = src_str
+        .replace("%APPDATA%", "C:\\Users\\user\\AppData\\Roaming")
+        .replace("%LOCALAPPDATA%", "C:\\Users\\user\\AppData\\Local")
+        .replace("%USERPROFILE%", "C:\\Users\\user")
+        .replace("%PROGRAMDATA%", "C:\\ProgramData")
+        .replace("%TEMP%", "C:\\Windows\\Temp")
+        .replace("%TMP%", "C:\\Windows\\Temp")
+        .replace("%WINDIR%", "C:\\Windows")
+        .replace("%SYSTEMROOT%", "C:\\Windows");
+    let needed = (expanded.len() + 1) as u32;
+    if lp_dst.is_null() || n_size < needed {
+        return needed;
+    }
+    std::ptr::copy_nonoverlapping(expanded.as_ptr(), lp_dst, expanded.len());
+    *lp_dst.add(expanded.len()) = 0;
+    needed
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CompareFileTime(
+    lp_file_time1: *const FILETIME,
+    lp_file_time2: *const FILETIME,
+) -> i32 {
+    if lp_file_time1.is_null() || lp_file_time2.is_null() {
+        return 0;
+    }
+    let t1 = ((*lp_file_time1).dwHighDateTime as u64) << 32 | ((*lp_file_time1).dwLowDateTime as u64);
+    let t2 = ((*lp_file_time2).dwHighDateTime as u64) << 32 | ((*lp_file_time2).dwLowDateTime as u64);
+    if t1 < t2 {
+        -1
+    } else if t1 > t2 {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn VirtualUnlock(_lp_address: usize, _dw_size: usize) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetProcessHandleCount(
+    _h_process: usize,
+    pdw_handle_count: *mut u32,
+) -> i32 {
+    if !pdw_handle_count.is_null() {
+        *pdw_handle_count = 32;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn AllocConsole() -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetConsoleWindow() -> usize {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn GetFinalPathNameByHandleW(
+    h_file: usize,
+    lpsz_file_path: *mut u16,
+    cch_file_path: u32,
+    dw_flags: u32,
+) -> u32 {
+    let fd = h_file as i64 as i32;
+    let Ok(host) = std::fs::read_link(format!("/proc/self/fd/{}", fd)) else {
+        SetLastError(6);
+        return 0;
+    };
+    let s = host.to_string_lossy();
+    let win_dos = if let Some(idx) = s.find("/drive_c/") {
+        format!("C:{}", s[idx + "/drive_c".len()..].replace('/', "\\"))
+    } else if s.ends_with("/drive_c") {
+        "C:\\".to_string()
+    } else if let Some(idx) = s.find("/.local/share/Steam/") {
+        let rest = &s[idx + "/.local/share/Steam/".len()..];
+        format!("C:\\Program Files (x86)\\Steam\\{}", rest.replace('/', "\\"))
+    } else {
+        format!("Z:{}", s.replace('/', "\\"))
+    };
+    let out_str = if (dw_flags & 0xF) == 0 {
+        format!("\\\\?\\{}", win_dos)
+    } else {
+        win_dos
+    };
+    let utf16: Vec<u16> = out_str.encode_utf16().collect();
+    let needed_with_null = (utf16.len() + 1) as u32;
+    if lpsz_file_path.is_null() || cch_file_path < needed_with_null {
+        SetLastError(122); // ERROR_INSUFFICIENT_BUFFER
+        return needed_with_null;
+    }
+    for (i, ch) in utf16.iter().enumerate() {
+        *lpsz_file_path.add(i) = *ch;
+    }
+    *lpsz_file_path.add(utf16.len()) = 0;
+    SetLastError(0);
+    utf16.len() as u32
 }
 
 #[repr(C)]
@@ -10719,7 +11737,46 @@ pub unsafe extern "win64" fn GetThreadContext(h_thread: u64, lp_context: *mut li
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn SetThreadContext(_h_thread: u64, _lp_context: *const libc::c_void) -> i32 {
+pub unsafe extern "win64" fn SetThreadContext(h_thread: u64, lp_context: *const libc::c_void) -> i32 {
+    if lp_context.is_null() {
+        SetLastError(87);
+        return 0;
+    }
+    let entry_opt = {
+        let guard = THREAD_HANDLE_TABLE.lock().unwrap();
+        guard.as_ref().and_then(|t| t.get(&h_thread).cloned())
+    };
+    let Some(entry) = entry_opt else {
+        SetLastError(6);
+        return 0;
+    };
+    let ctx = lp_context as *const u8;
+    let flags = *(ctx.add(0x30) as *const u32);
+    // CONTEXT_CONTROL = 0x100001 / 0x1, CONTEXT_INTEGER = 0x100002 / 0x2
+    if (flags & 0x0000_0001) != 0 {
+        entry.last_rsp.store(*(ctx.add(0x98) as *const u64), Ordering::SeqCst);
+        entry.last_rip.store(*(ctx.add(0xF8) as *const u64), Ordering::SeqCst);
+    }
+    if (flags & 0x0000_0002) != 0 {
+        entry.last_rax.store(*(ctx.add(0x78) as *const u64), Ordering::SeqCst);
+        entry.last_rcx.store(*(ctx.add(0x80) as *const u64), Ordering::SeqCst);
+        entry.last_rdx.store(*(ctx.add(0x88) as *const u64), Ordering::SeqCst);
+        entry.last_rbx.store(*(ctx.add(0x90) as *const u64), Ordering::SeqCst);
+        entry.last_rbp.store(*(ctx.add(0xA0) as *const u64), Ordering::SeqCst);
+        entry.last_rsi.store(*(ctx.add(0xA8) as *const u64), Ordering::SeqCst);
+        entry.last_rdi.store(*(ctx.add(0xB0) as *const u64), Ordering::SeqCst);
+        entry.last_r8.store(*(ctx.add(0xB8) as *const u64), Ordering::SeqCst);
+        entry.last_r9.store(*(ctx.add(0xC0) as *const u64), Ordering::SeqCst);
+        entry.last_r10.store(*(ctx.add(0xC8) as *const u64), Ordering::SeqCst);
+        entry.last_r11.store(*(ctx.add(0xD0) as *const u64), Ordering::SeqCst);
+        entry.last_r12.store(*(ctx.add(0xD8) as *const u64), Ordering::SeqCst);
+        entry.last_r13.store(*(ctx.add(0xE0) as *const u64), Ordering::SeqCst);
+        entry.last_r14.store(*(ctx.add(0xE8) as *const u64), Ordering::SeqCst);
+        entry.last_r15.store(*(ctx.add(0xF0) as *const u64), Ordering::SeqCst);
+    }
+    if (flags & 0x0000_0003) != 0 {
+        entry.context_dirty.store(true, Ordering::SeqCst);
+    }
     1
 }
 
@@ -11282,8 +12339,8 @@ pub unsafe extern "win64" fn ProcessIdToSessionId(_dw_process_id: u32, p_session
 
 #[no_mangle]
 pub unsafe extern "win64" fn DeviceIoControl(
-    _h_device: usize,
-    _dw_io_control_code: u32,
+    h_device: usize,
+    dw_io_control_code: u32,
     _lp_in_buffer: *const std::ffi::c_void,
     _n_in_buffer_size: u32,
     _lp_out_buffer: *mut std::ffi::c_void,
@@ -11291,8 +12348,19 @@ pub unsafe extern "win64" fn DeviceIoControl(
     lp_bytes_returned: *mut u32,
     _lp_overlapped: *mut std::ffi::c_void,
 ) -> i32 {
+    if std::env::var_os("RINE_VERBOSE_IO").is_some() {
+        println!(
+            "[KERNEL32] DeviceIoControl(fd={}, code=0x{:X})",
+            h_device, dw_io_control_code
+        );
+    }
     if !lp_bytes_returned.is_null() {
         *lp_bytes_returned = 0;
+    }
+    if dw_io_control_code == 0x000900A8 {
+        // FSCTL_GET_REPARSE_POINT: host paths are not NTFS reparse points.
+        SetLastError(4390); // ERROR_NOT_A_REPARSE_POINT
+        return 0;
     }
     1
 }
@@ -11705,7 +12773,39 @@ pub unsafe extern "win64" fn CreateNamedPipeA(
     _n_default_time_out: u32,
     _lp_security_attributes: *mut libc::c_void,
 ) -> usize {
-    0x2000
+    0x50001
+}
+
+static NEXT_NAMED_PIPE_HANDLE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0x50002);
+
+#[no_mangle]
+pub unsafe extern "win64" fn CreateNamedPipeW(
+    _lp_name: *const u16,
+    _dw_open_mode: u32,
+    _dw_pipe_mode: u32,
+    _n_max_instances: u32,
+    _n_out_buffer_size: u32,
+    _n_in_buffer_size: u32,
+    _n_default_time_out: u32,
+    _lp_security_attributes: *mut libc::c_void,
+) -> usize {
+    NEXT_NAMED_PIPE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn WaitNamedPipeW(_lp_named_pipe_name: *const u16, _n_time_out: u32) -> i32 {
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn SetNamedPipeHandleState(
+    _h_named_pipe: usize,
+    _lp_mode: *const u32,
+    _lp_max_collection_count: *const u32,
+    _lp_collect_data_timeout: *const u32,
+) -> i32 {
+    1
 }
 
 #[no_mangle]
@@ -11743,6 +12843,31 @@ pub unsafe extern "win64" fn lstrcmpA(lp_string1: *const u8, lp_string2: *const 
     let s1 = std::ffi::CStr::from_ptr(lp_string1 as *const i8);
     let s2 = std::ffi::CStr::from_ptr(lp_string2 as *const i8);
     s1.cmp(s2) as i32
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn lstrcmpW(lp_string1: *const u16, lp_string2: *const u16) -> i32 {
+    if lp_string1.is_null() && lp_string2.is_null() {
+        return 0;
+    }
+    if lp_string1.is_null() {
+        return -1;
+    }
+    if lp_string2.is_null() {
+        return 1;
+    }
+    let mut i = 0;
+    loop {
+        let c1 = *lp_string1.add(i);
+        let c2 = *lp_string2.add(i);
+        if c1 != c2 {
+            return if c1 < c2 { -1 } else { 1 };
+        }
+        if c1 == 0 {
+            return 0;
+        }
+        i += 1;
+    }
 }
 
 #[no_mangle]

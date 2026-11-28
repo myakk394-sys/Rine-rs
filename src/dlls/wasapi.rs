@@ -1,7 +1,8 @@
 #![allow(non_snake_case)]
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 pub type HRESULT = i32;
 pub const S_OK: HRESULT = 0;
@@ -64,8 +65,6 @@ pub static SDL_AUDIO_DEVICE_ID: AtomicU32 = AtomicU32::new(0);
 pub static SDL_AUDIO_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static SDL_AUDIO_INIT_STARTED: AtomicBool = AtomicBool::new(false);
 pub static AUDIO_IS_FLOAT: AtomicBool = AtomicBool::new(false);
-static AUDIO_BUFFER: Mutex<Option<Vec<u8>>> = Mutex::new(None);
-static AUDIO_EVENT_HANDLE: AtomicU64 = AtomicU64::new(0);
 
 pub static AUDIO_SAMPLE_RATE: AtomicU32 = AtomicU32::new(48000);
 pub static AUDIO_CHANNELS: AtomicU32 = AtomicU32::new(2);
@@ -78,6 +77,93 @@ pub static AUDIO_RELEASE_BUFFER_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static AUDIO_BYTES_SUBMITTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static AUDIO_NONZERO_SAMPLES_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static AUDIO_PEAK_AMPLITUDE_MILLIS: AtomicU32 = AtomicU32::new(0);
+
+static NEXT_AUDIO_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+static AUDIO_STREAMS: Mutex<Vec<Weak<Mutex<AudioStreamState>>>> = Mutex::new(Vec::new());
+
+pub struct AudioStreamState {
+    pub id: u64,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub bits_per_sample: u16,
+    pub block_align: u32,
+    pub is_float: bool,
+    pub buffer_size_frames: u32,
+    pub event_handle: u64,
+    pub started: bool,
+    pub initialized: bool,
+    pub staging_buf: Vec<u8>,
+    /// Interleaved stereo f32 samples (len = queued_frames * 2) at `sample_rate`.
+    pub queued_stereo_f32: VecDeque<f32>,
+    pub frames_played: u64,
+}
+
+impl AudioStreamState {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            sample_rate: 48000,
+            channels: 2,
+            bits_per_sample: 32,
+            block_align: 8,
+            is_float: true,
+            buffer_size_frames: 2048,
+            event_handle: 0,
+            started: false,
+            initialized: false,
+            staging_buf: Vec::new(),
+            queued_stereo_f32: VecDeque::new(),
+            frames_played: 0,
+        }
+    }
+
+    fn queued_frames(&self) -> u32 {
+        (self.queued_stereo_f32.len() / 2) as u32
+    }
+}
+
+fn register_audio_stream() -> Arc<Mutex<AudioStreamState>> {
+    let id = NEXT_AUDIO_CLIENT_ID.fetch_add(1, Ordering::SeqCst);
+    let state = Arc::new(Mutex::new(AudioStreamState::new(id)));
+    if let Ok(mut list) = AUDIO_STREAMS.lock() {
+        list.retain(|w| w.strong_count() > 0);
+        list.push(Arc::downgrade(&state));
+    }
+    state
+}
+
+unsafe fn set_obj_stream_state(obj: *mut MockComObject, state: Option<Arc<Mutex<AudioStreamState>>>) {
+    if let Some(arc) = state {
+        (*obj).extra_data = Arc::into_raw(arc) as usize;
+    } else {
+        (*obj).extra_data = 0;
+    }
+}
+
+unsafe fn get_obj_stream_state(this: *mut c_void) -> Option<Arc<Mutex<AudioStreamState>>> {
+    if this.is_null() {
+        return None;
+    }
+    let obj = this as *const MockComObject;
+    let ptr = (*obj).extra_data as *const Mutex<AudioStreamState>;
+    if ptr.is_null() {
+        return None;
+    }
+    Arc::increment_strong_count(ptr);
+    Some(Arc::from_raw(ptr))
+}
+
+unsafe fn drop_obj_stream_state(this: *mut c_void) {
+    if this.is_null() {
+        return;
+    }
+    let obj = this as *mut MockComObject;
+    let ptr = (*obj).extra_data as *const Mutex<AudioStreamState>;
+    if !ptr.is_null() {
+        (*obj).extra_data = 0;
+        drop(Arc::from_raw(ptr));
+    }
+}
 
 pub fn get_max_queue_bytes() -> u32 {
     let rate = AUDIO_SAMPLE_RATE.load(Ordering::Relaxed).max(8000);
@@ -151,6 +237,10 @@ pub fn get_audio_telemetry_snapshot() -> (u32, u32, u32, u32, u32, u32, u32, u64
 }
 
 fn ensure_sdl_audio_init(sample_rate: u32, channels: u16, bits: u16, is_float: bool) {
+    if SDL_AUDIO_INITIALIZED.load(Ordering::SeqCst) && SDL_AUDIO_DEVICE_ID.load(Ordering::SeqCst) > 0
+    {
+        return;
+    }
     println!(
         "[WASAPI] ensure_sdl_audio_init: rate={} channels={} bits={} is_float={}",
         sample_rate, channels, bits, is_float
@@ -158,22 +248,11 @@ fn ensure_sdl_audio_init(sample_rate: u32, channels: u16, bits: u16, is_float: b
     let bytes_per_sample = ((bits as u32) / 8).max(2);
     let block_align = (channels as u32) * bytes_per_sample;
 
-    let old_rate = AUDIO_SAMPLE_RATE.swap(sample_rate, Ordering::SeqCst);
-    let old_channels = AUDIO_CHANNELS.swap(channels as u32, Ordering::SeqCst);
-    let old_bits = AUDIO_BITS_PER_SAMPLE.swap(bits as u32, Ordering::SeqCst);
-    let _ = AUDIO_BLOCK_ALIGN.swap(block_align, Ordering::SeqCst);
-    let old_is_float = AUDIO_IS_FLOAT.swap(is_float, Ordering::SeqCst);
-
-    let cur_id = SDL_AUDIO_DEVICE_ID.load(Ordering::SeqCst);
-    let format_changed = cur_id > 0
-        && (old_rate != sample_rate
-            || old_channels != channels as u32
-            || old_bits != bits as u32
-            || old_is_float != is_float);
-
-    if SDL_AUDIO_INITIALIZED.load(Ordering::SeqCst) && !format_changed {
-        return;
-    }
+    AUDIO_SAMPLE_RATE.store(sample_rate, Ordering::SeqCst);
+    AUDIO_CHANNELS.store(channels as u32, Ordering::SeqCst);
+    AUDIO_BITS_PER_SAMPLE.store(bits as u32, Ordering::SeqCst);
+    AUDIO_BLOCK_ALIGN.store(block_align, Ordering::SeqCst);
+    AUDIO_IS_FLOAT.store(is_float, Ordering::SeqCst);
 
     let mut sdl_handle = crate::windowing::x11::get_sdl_handle();
     if sdl_handle.is_null() {
@@ -191,26 +270,6 @@ fn ensure_sdl_audio_init(sample_rate: u32, channels: u16, bits: u16, is_float: b
     if sdl_handle.is_null() {
         println!("[WASAPI AUDIO BACKEND] ERROR: get_sdl_handle() is NULL!");
         return;
-    }
-
-    if cur_id > 0 && format_changed {
-        unsafe {
-            type SdlCloseAudioDeviceFn = unsafe extern "C" fn(u32);
-            let sym_close = libc::dlsym(
-                sdl_handle,
-                std::ffi::CString::new("SDL_CloseAudioDevice").unwrap().as_ptr(),
-            );
-            if !sym_close.is_null() {
-                let fn_close: SdlCloseAudioDeviceFn = std::mem::transmute(sym_close);
-                fn_close(cur_id);
-                println!(
-                    "[WASAPI AUDIO BACKEND] Closed previous SDL Audio Device id={}",
-                    cur_id
-                );
-            }
-        }
-        SDL_AUDIO_DEVICE_ID.store(0, Ordering::SeqCst);
-        SDL_AUDIO_INITIALIZED.store(false, Ordering::SeqCst);
     }
 
     unsafe {
@@ -340,6 +399,117 @@ fn get_sdl_queued_audio_bytes() -> u32 {
 
 static AUDIO_CLOCK_STARTED: AtomicBool = AtomicBool::new(false);
 
+fn mix_and_submit_audio_tick() {
+    let sdl_rate = AUDIO_SAMPLE_RATE.load(Ordering::Relaxed).max(8000);
+    let sdl_align = AUDIO_BLOCK_ALIGN.load(Ordering::Relaxed).max(4);
+    let max_sdl_bytes = (sdl_rate as u64 * sdl_align as u64 * 40 / 1000) as u32;
+    let sdl_has_room = get_sdl_queued_audio_bytes() < max_sdl_bytes;
+    let mix_frames = (sdl_rate / 100).max(1) as usize; // ~10ms (480 frames at 48kHz)
+
+    let streams: Vec<Arc<Mutex<AudioStreamState>>> = {
+        let Ok(mut guard) = AUDIO_STREAMS.lock() else {
+            return;
+        };
+        let mut active = Vec::with_capacity(guard.len());
+        guard.retain(|w| {
+            if let Some(arc) = w.upgrade() {
+                active.push(arc);
+                true
+            } else {
+                false
+            }
+        });
+        active
+    };
+
+    if streams.is_empty() {
+        return;
+    }
+
+    let mut mix_buf = vec![0.0f32; mix_frames * 2];
+    let mut max_drained_frames = 0usize;
+    let mut any_started = false;
+    let mut events_to_signal: Vec<u64> = Vec::new();
+
+    for stream_arc in streams {
+        let Ok(mut st) = stream_arc.lock() else {
+            continue;
+        };
+        if !st.started {
+            continue;
+        }
+        any_started = true;
+
+        if sdl_has_room {
+            let avail = st.queued_stereo_f32.len() / 2;
+            if st.sample_rate == sdl_rate || st.sample_rate == 0 {
+                let drain = avail.min(mix_frames);
+                for i in 0..drain {
+                    mix_buf[i * 2] += st.queued_stereo_f32.pop_front().unwrap_or(0.0);
+                    mix_buf[i * 2 + 1] += st.queued_stereo_f32.pop_front().unwrap_or(0.0);
+                }
+                st.frames_played += drain as u64;
+                if drain > max_drained_frames {
+                    max_drained_frames = drain;
+                }
+            } else {
+                let src_needed = ((mix_frames as u64 * st.sample_rate as u64) / sdl_rate as u64)
+                    .max(1) as usize;
+                let drain = avail.min(src_needed);
+                if drain > 0 {
+                    let mut src = Vec::with_capacity(drain * 2);
+                    for _ in 0..drain {
+                        src.push(st.queued_stereo_f32.pop_front().unwrap_or(0.0));
+                        src.push(st.queued_stereo_f32.pop_front().unwrap_or(0.0));
+                    }
+                    let out_frames = ((drain as u64 * sdl_rate as u64) / st.sample_rate as u64)
+                        .min(mix_frames as u64) as usize;
+                    for i in 0..out_frames {
+                        let pos = (i as f32) * (drain as f32) / (out_frames.max(1) as f32);
+                        let idx0 = (pos as usize).min(drain - 1);
+                        let idx1 = (idx0 + 1).min(drain - 1);
+                        let frac = pos - (idx0 as f32);
+                        let l = src[idx0 * 2] * (1.0 - frac) + src[idx1 * 2] * frac;
+                        let r = src[idx0 * 2 + 1] * (1.0 - frac) + src[idx1 * 2 + 1] * frac;
+                        mix_buf[i * 2] += l;
+                        mix_buf[i * 2 + 1] += r;
+                    }
+                    st.frames_played += drain as u64;
+                    if out_frames > max_drained_frames {
+                        max_drained_frames = out_frames;
+                    }
+                }
+            }
+        }
+
+        if st.event_handle != 0 && st.queued_frames() < st.buffer_size_frames {
+            events_to_signal.push(st.event_handle);
+        }
+    }
+
+    if any_started && sdl_has_room && max_drained_frames > 0 {
+        let sample_count = max_drained_frames * 2;
+        for s in &mut mix_buf[..sample_count] {
+            *s = s.clamp(-1.0, 1.0);
+        }
+        if AUDIO_IS_FLOAT.load(Ordering::Relaxed) {
+            queue_sdl_audio(mix_buf.as_ptr() as *const u8, sample_count * 4);
+        } else {
+            let pcm16: Vec<i16> = mix_buf[..sample_count]
+                .iter()
+                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .collect();
+            queue_sdl_audio(pcm16.as_ptr() as *const u8, pcm16.len() * 2);
+        }
+    }
+
+    for h_event in events_to_signal {
+        unsafe {
+            crate::dlls::kernel32::SetEvent(h_event);
+        }
+    }
+}
+
 fn ensure_audio_clock_thread() {
     if AUDIO_CLOCK_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -348,13 +518,8 @@ fn ensure_audio_clock_thread() {
         .name("rine_audio_clock".into())
         .spawn(|| {
             while AUDIO_CLOCK_STARTED.load(Ordering::Relaxed) {
-                let h_event = AUDIO_EVENT_HANDLE.load(Ordering::Relaxed);
-                if h_event != 0 {
-                    unsafe {
-                        crate::dlls::kernel32::SetEvent(h_event);
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                mix_and_submit_audio_tick();
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         })
         .ok();
@@ -949,7 +1114,12 @@ unsafe extern "win64" fn mm_dev_activate(
             return create_simple_audio_volume(pp_interface);
         }
         if g.Data1 == 0x7ED4EE07 {
-            println!("[WASAPI] IMMDevice::Activate(IAudioClient3) -> E_NOINTERFACE (triggering Godot graceful fallback to IAudioClient)");
+            println!("[WASAPI] IMMDevice::Activate(IAudioClient3) -> E_NOINTERFACE (triggering graceful fallback to IAudioClient)");
+            return E_NOINTERFACE;
+        }
+        if g.Data1 != 0x1CB9AD4C && g.Data1 != 0x726778CD {
+            println!("[WASAPI] IMMDevice::Activate(unknown IID Data1=0x{:08X}) -> E_NOINTERFACE", g.Data1);
+            *pp_interface = std::ptr::null_mut();
             return E_NOINTERFACE;
         }
     }
@@ -1032,6 +1202,12 @@ unsafe extern "win64" fn prop_store_get_value(
 
     if !key.is_null() {
         let pid = (*key).pid;
+        let data1 = u32::from_le_bytes([
+            (*key).fmtid[0],
+            (*key).fmtid[1],
+            (*key).fmtid[2],
+            (*key).fmtid[3],
+        ]);
         if pid == 14 {
             // PKEY_Device_FriendlyName (pid 14) -> VT_LPWSTR (31)
             let name: Vec<u16> = "Rine Virtual Audio Device\0".encode_utf16().collect();
@@ -1043,7 +1219,23 @@ unsafe extern "win64" fn prop_store_get_value(
                 *(((pv as *mut u8).add(8)) as *mut *mut u16) = mem;
             }
             return S_OK;
-        } else if pid == 0 {
+        } else if data1 == 0xf19f_064d && pid == 0 {
+            // PKEY_AudioEngine_DeviceFormat -> VT_BLOB (65) with valid 18-byte WAVEFORMATEX
+            let wfx = libc::calloc(1, 18) as *mut u8;
+            if !wfx.is_null() {
+                *(wfx.add(0) as *mut u16) = 1; // WAVE_FORMAT_PCM
+                *(wfx.add(2) as *mut u16) = 2; // nChannels
+                *(wfx.add(4) as *mut u32) = 48000; // nSamplesPerSec
+                *(wfx.add(8) as *mut u32) = 192000; // nAvgBytesPerSec
+                *(wfx.add(12) as *mut u16) = 4; // nBlockAlign
+                *(wfx.add(14) as *mut u16) = 16; // wBitsPerSample
+                *(wfx.add(16) as *mut u16) = 0; // cbSize
+                *(pv as *mut u16) = 65; // VT_BLOB
+                *((pv as *mut u8).add(8) as *mut u32) = 18; // cbSize
+                *((pv as *mut u8).add(16) as *mut *mut u8) = wfx; // pBlobData
+                return S_OK;
+            }
+        } else if data1 == 0x1da5_d803 && pid == 0 {
             // PKEY_AudioEndpoint_FormFactor (pid 0) -> VT_UI4 (19)
             *(pv as *mut u16) = 19; // VT_UI4
             *(((pv as *mut u8).add(8)) as *mut u32) = 0; // Speakers
@@ -1144,12 +1336,15 @@ pub unsafe extern "win64" fn create_audio_client(ppv: *mut *mut c_void) -> HRESU
     if obj.is_null() {
         return E_FAIL;
     }
+    let state = register_audio_stream();
+    let client_id = state.lock().map(|s| s.id).unwrap_or(0);
     (*obj).lpVtbl = AUDIO_CLIENT_VTBL.as_ptr() as *const c_void;
     (*obj).refcount = 1;
+    set_obj_stream_state(obj, Some(state));
     *ppv = obj as *mut c_void;
     println!(
-        "[WASAPI] Created IAudioClient (obj=0x{:016X})",
-        obj as usize
+        "[WASAPI] Created IAudioClient #{} (obj=0x{:016X})",
+        client_id, obj as usize
     );
     S_OK
 }
@@ -1191,13 +1386,14 @@ unsafe extern "win64" fn audio_client_release(this: *mut c_void) -> u32 {
         (*obj).refcount -= 1;
         (*obj).refcount
     } else {
+        drop_obj_stream_state(this);
         libc::free(this);
         0
     }
 }
 
 unsafe extern "win64" fn audio_client_initialize(
-    _this: *mut c_void,
+    this: *mut c_void,
     share_mode: u32,
     stream_flags: u32,
     hns_buffer_duration: i64,
@@ -1218,38 +1414,59 @@ unsafe extern "win64" fn audio_client_initialize(
         let bits = (*p_format).wBitsPerSample;
         let rate = (*p_format).nSamplesPerSec;
         let channels = (*p_format).nChannels;
-        let align = if (*p_format).nBlockAlign > 0 {
-            (*p_format).nBlockAlign as u32
+        if rate < 8000 || rate > 384_000 || channels == 0 || channels > 32 || bits == 0 || bits > 64 {
+            (48000, 2, 16, 4, false)
         } else {
-            (channels as u32) * ((bits as u32) / 8).max(2)
-        };
-        (rate, channels, bits, align, is_float)
+            let align = if (*p_format).nBlockAlign > 0 && (*p_format).nBlockAlign <= 256 {
+                (*p_format).nBlockAlign as u32
+            } else {
+                (channels as u32) * ((bits as u32) / 8).max(2)
+            };
+            (rate, channels, bits, align, is_float)
+        }
     } else {
         (48000, 2, 16, 4, false)
     };
-    println!(
-        "[WASAPI] IAudioClient::Initialize(shareMode={}, flags=0x{:X}, duration={}, rate={}, channels={}, bits={}, align={}, isFloat={})",
-        share_mode, stream_flags, hns_buffer_duration, rate, channels, bits, block_align, is_float
-    );
-    ensure_sdl_audio_init(rate, channels, bits, is_float);
-    let requested_frames = (hns_buffer_duration * (rate as i64) / 10_000_000).max(2048) as u32;
-    let buffer_frames = requested_frames.max(2048);
-    AUDIO_BUFFER_SIZE_FRAMES.store(buffer_frames, Ordering::SeqCst);
+    let requested_frames = (hns_buffer_duration.clamp(0, 10_000_000) * (rate as i64) / 10_000_000).max(2048) as u32;
+    let buffer_frames = requested_frames.clamp(2048, 48000 * 4);
 
-    let mut buf_guard = AUDIO_BUFFER.lock().unwrap();
-    *buf_guard = Some(vec![
-        0u8;
-        (buffer_frames as usize) * (block_align as usize)
-    ]);
+    let mut client_id = 0u64;
+    if let Some(state_arc) = get_obj_stream_state(this) {
+        if let Ok(mut st) = state_arc.lock() {
+            client_id = st.id;
+            st.sample_rate = rate;
+            st.channels = channels;
+            st.bits_per_sample = bits;
+            st.block_align = block_align;
+            st.is_float = is_float;
+            st.buffer_size_frames = buffer_frames;
+            st.staging_buf = vec![0u8; (buffer_frames as usize) * (block_align as usize)];
+            st.queued_stereo_f32.clear();
+            st.frames_played = 0;
+            st.initialized = true;
+        }
+    }
+    println!(
+        "[WASAPI] IAudioClient #{}::Initialize(shareMode={}, flags=0x{:X}, duration={}, rate={}, channels={}, bits={}, align={}, isFloat={}, bufFrames={})",
+        client_id, share_mode, stream_flags, hns_buffer_duration, rate, channels, bits, block_align, is_float, buffer_frames
+    );
+    // Open the single shared SDL2 mixer device once (48kHz, stereo, 32-bit float) if not yet initialized.
+    if !SDL_AUDIO_INITIALIZED.load(Ordering::SeqCst) {
+        ensure_sdl_audio_init(48000, 2, 32, true);
+    }
+    AUDIO_BUFFER_SIZE_FRAMES.store(buffer_frames, Ordering::SeqCst);
     S_OK
 }
 
 unsafe extern "win64" fn audio_client_get_buffer_size(
-    _this: *mut c_void,
+    this: *mut c_void,
     p_num_buffer_frames: *mut u32,
 ) -> HRESULT {
     if !p_num_buffer_frames.is_null() {
-        *p_num_buffer_frames = AUDIO_BUFFER_SIZE_FRAMES.load(Ordering::Relaxed).max(2048);
+        let frames = get_obj_stream_state(this)
+            .and_then(|arc| arc.lock().ok().map(|st| st.buffer_size_frames.max(2048)))
+            .unwrap_or_else(|| AUDIO_BUFFER_SIZE_FRAMES.load(Ordering::Relaxed).max(2048));
+        *p_num_buffer_frames = frames;
     }
     S_OK
 }
@@ -1265,20 +1482,27 @@ unsafe extern "win64" fn audio_client_get_stream_latency(
 }
 
 unsafe extern "win64" fn audio_client_get_current_padding(
-    _this: *mut c_void,
+    this: *mut c_void,
     p_num_padding_frames: *mut u32,
 ) -> HRESULT {
     if !p_num_padding_frames.is_null() {
-        let queued = get_sdl_queued_audio_bytes();
-        let align = AUDIO_BLOCK_ALIGN.load(Ordering::Relaxed).max(1);
-        let buf_frames = AUDIO_BUFFER_SIZE_FRAMES.load(Ordering::Relaxed).max(512);
-        let target_prefill_frames = 2048u32; // ~42ms preload
-        let queued_frames = queued / align;
-        *p_num_padding_frames = queued_frames.saturating_sub(target_prefill_frames).min(buf_frames);
+        let (client_id, queued_frames, buf_frames) = if let Some(state_arc) = get_obj_stream_state(this) {
+            if let Ok(st) = state_arc.lock() {
+                (st.id, st.queued_frames(), st.buffer_size_frames.max(512))
+            } else {
+                (0, 0, 2048)
+            }
+        } else {
+            (0, 0, AUDIO_BUFFER_SIZE_FRAMES.load(Ordering::Relaxed).max(512))
+        };
+        *p_num_padding_frames = queued_frames.min(buf_frames);
         static PAD_C: AtomicU64 = AtomicU64::new(0);
         let c = PAD_C.fetch_add(1, Ordering::Relaxed);
         if c < 20 || c % 100 == 0 {
-            println!("[WASAPI] GetCurrentPadding #{} -> queued_bytes={}, queued_frames={}, padding={}", c, queued, queued_frames, *p_num_padding_frames);
+            println!(
+                "[WASAPI] GetCurrentPadding #{} (client={}) -> queued_frames={}, padding={}",
+                c, client_id, queued_frames, *p_num_padding_frames
+            );
         }
     }
     S_OK
@@ -1351,19 +1575,21 @@ unsafe extern "win64" fn audio_client_get_device_period(
     S_OK
 }
 
-unsafe extern "win64" fn audio_client_start(_this: *mut c_void) -> HRESULT {
-    println!("[WASAPI] IAudioClient::Start()");
+unsafe extern "win64" fn audio_client_start(this: *mut c_void) -> HRESULT {
+    let mut client_id = 0u64;
+    let mut signal_event = 0u64;
+    if let Some(state_arc) = get_obj_stream_state(this) {
+        if let Ok(mut st) = state_arc.lock() {
+            client_id = st.id;
+            st.started = true;
+            if st.event_handle != 0 && st.queued_frames() < st.buffer_size_frames {
+                signal_event = st.event_handle;
+            }
+        }
+    }
+    println!("[WASAPI] IAudioClient #{}::Start()", client_id);
     if !SDL_AUDIO_INITIALIZED.load(Ordering::SeqCst) {
-        let rate = AUDIO_SAMPLE_RATE.load(Ordering::SeqCst);
-        let channels = AUDIO_CHANNELS.load(Ordering::SeqCst) as u16;
-        let bits = AUDIO_BITS_PER_SAMPLE.load(Ordering::SeqCst) as u16;
-        let is_float = AUDIO_IS_FLOAT.load(Ordering::SeqCst);
-        ensure_sdl_audio_init(
-            if rate > 0 { rate } else { 48000 },
-            if channels > 0 { channels } else { 2 },
-            if bits > 0 { bits } else { 16 },
-            is_float,
-        );
+        ensure_sdl_audio_init(48000, 2, 32, true);
     }
     let dev_id = SDL_AUDIO_DEVICE_ID.load(Ordering::SeqCst);
     if dev_id > 0 {
@@ -1381,58 +1607,74 @@ unsafe extern "win64" fn audio_client_start(_this: *mut c_void) -> HRESULT {
         }
     }
     ensure_audio_clock_thread();
-    let h_event = AUDIO_EVENT_HANDLE.load(Ordering::SeqCst);
-    if h_event != 0 {
-        crate::dlls::kernel32::SetEvent(h_event);
+    if signal_event != 0 {
+        crate::dlls::kernel32::SetEvent(signal_event);
     }
     S_OK
 }
 
-unsafe extern "win64" fn audio_client_stop(_this: *mut c_void) -> HRESULT {
+unsafe extern "win64" fn audio_client_stop(this: *mut c_void) -> HRESULT {
+    if let Some(state_arc) = get_obj_stream_state(this) {
+        if let Ok(mut st) = state_arc.lock() {
+            st.started = false;
+            println!("[WASAPI] IAudioClient #{}::Stop()", st.id);
+        }
+    }
     S_OK
 }
 
-unsafe extern "win64" fn audio_client_reset(_this: *mut c_void) -> HRESULT {
+unsafe extern "win64" fn audio_client_reset(this: *mut c_void) -> HRESULT {
+    if let Some(state_arc) = get_obj_stream_state(this) {
+        if let Ok(mut st) = state_arc.lock() {
+            st.queued_stereo_f32.clear();
+            st.frames_played = 0;
+            println!("[WASAPI] IAudioClient #{}::Reset()", st.id);
+        }
+    }
     S_OK
 }
 
 unsafe extern "win64" fn audio_client_set_event_handle(
-    _this: *mut c_void,
+    this: *mut c_void,
     event_handle: u64,
 ) -> HRESULT {
-    println!(
-        "[WASAPI] IAudioClient::SetEventHandle(0x{:X})",
-        event_handle
-    );
-    AUDIO_EVENT_HANDLE.store(event_handle, Ordering::SeqCst);
-    ensure_audio_clock_thread();
-    if event_handle != 0 {
-        crate::dlls::kernel32::SetEvent(event_handle);
+    let mut client_id = 0u64;
+    if let Some(state_arc) = get_obj_stream_state(this) {
+        if let Ok(mut st) = state_arc.lock() {
+            client_id = st.id;
+            st.event_handle = event_handle;
+        }
     }
+    println!(
+        "[WASAPI] IAudioClient #{}::SetEventHandle(0x{:X})",
+        client_id, event_handle
+    );
+    ensure_audio_clock_thread();
     S_OK
 }
 
 unsafe extern "win64" fn audio_client_get_service(
-    _this: *mut c_void,
+    this: *mut c_void,
     riid: *const u8,
     ppv: *mut *mut c_void,
 ) -> HRESULT {
     if ppv.is_null() {
         return E_POINTER;
     }
+    let state = get_obj_stream_state(this);
     if riid.is_null() {
-        return create_audio_render_client(ppv);
+        return create_audio_render_client_with_state(ppv, state);
     }
     let g = *(riid as *const GUID);
     println!("[WASAPI] IAudioClient::GetService(GUID: 0x{:08X})", g.Data1);
     match g.Data1 {
         0xF294ACFC => {
             // IID_IAudioRenderClient
-            create_audio_render_client(ppv)
+            create_audio_render_client_with_state(ppv, state)
         }
         0xCD63314F | 0x6F49FF73 => {
             // IID_IAudioClock, IID_IAudioClock2
-            create_audio_clock(ppv)
+            create_audio_clock_with_state(ppv, state)
         }
         0x87CE5498 => {
             // IID_ISimpleAudioVolume
@@ -1440,10 +1682,10 @@ unsafe extern "win64" fn audio_client_get_service(
         }
         0xF4B1A599 | 0xBFB7FF88 => {
             // IID_IAudioSessionControl, IID_IAudioSessionControl2
-            create_audio_session_control(ppv)
+            create_audio_session_control_with_state(ppv, state)
         }
         _ => {
-            create_audio_render_client(ppv)
+            create_audio_render_client_with_state(ppv, state)
         }
     }
 }
@@ -1556,6 +1798,13 @@ static mut AUDIO_RENDER_CLIENT_VTBL: [*const c_void; 5] = [
 ];
 
 pub unsafe extern "win64" fn create_audio_render_client(ppv: *mut *mut c_void) -> HRESULT {
+    create_audio_render_client_with_state(ppv, Some(register_audio_stream()))
+}
+
+unsafe fn create_audio_render_client_with_state(
+    ppv: *mut *mut c_void,
+    state: Option<Arc<Mutex<AudioStreamState>>>,
+) -> HRESULT {
     if ppv.is_null() {
         return E_POINTER;
     }
@@ -1565,6 +1814,7 @@ pub unsafe extern "win64" fn create_audio_render_client(ppv: *mut *mut c_void) -
     }
     (*obj).lpVtbl = AUDIO_RENDER_CLIENT_VTBL.as_ptr() as *const c_void;
     (*obj).refcount = 1;
+    set_obj_stream_state(obj, state);
     *ppv = obj as *mut c_void;
     println!(
         "[WASAPI] Created IAudioRenderClient (obj=0x{:016X})",
@@ -1598,13 +1848,14 @@ unsafe extern "win64" fn audio_render_release(this: *mut c_void) -> u32 {
         (*obj).refcount -= 1;
         (*obj).refcount
     } else {
+        drop_obj_stream_state(this);
         libc::free(this);
         0
     }
 }
 
 unsafe extern "win64" fn audio_render_get_buffer(
-    _this: *mut c_void,
+    this: *mut c_void,
     num_frames_requested: u32,
     pp_data: *mut *mut u8,
 ) -> HRESULT {
@@ -1618,24 +1869,68 @@ unsafe extern "win64" fn audio_render_get_buffer(
             get_c, num_frames_requested
         );
     }
-    let align = AUDIO_BLOCK_ALIGN.load(Ordering::Relaxed).max(1) as usize;
-    let mut buf_guard = AUDIO_BUFFER.lock().unwrap();
-    if buf_guard.is_none() {
-        *buf_guard = Some(vec![0u8; 4096 * align]);
+    let Some(state_arc) = get_obj_stream_state(this) else {
+        return E_FAIL;
+    };
+    let Ok(mut st) = state_arc.lock() else {
+        return E_FAIL;
+    };
+    let align = st.block_align.max(1) as usize;
+    let needed_bytes = (num_frames_requested as usize) * align;
+    let min_bytes = needed_bytes.max(align);
+    if st.staging_buf.len() < min_bytes {
+        st.staging_buf.resize(min_bytes, 0);
     }
-    if let Some(buf) = buf_guard.as_mut() {
-        let needed_bytes = (num_frames_requested as usize) * align;
-        if buf.len() < needed_bytes {
-            buf.resize(needed_bytes, 0);
+    *pp_data = st.staging_buf.as_mut_ptr();
+    S_OK
+}
+
+fn read_sample_as_f32(frame_bytes: &[u8], ch_idx: usize, bits: u16, is_float: bool) -> f32 {
+    if is_float && bits == 32 {
+        let off = ch_idx * 4;
+        if off + 4 <= frame_bytes.len() {
+            return f32::from_le_bytes([
+                frame_bytes[off],
+                frame_bytes[off + 1],
+                frame_bytes[off + 2],
+                frame_bytes[off + 3],
+            ]);
         }
-        *pp_data = buf.as_mut_ptr();
-        return S_OK;
+    } else if !is_float && bits == 16 {
+        let off = ch_idx * 2;
+        if off + 2 <= frame_bytes.len() {
+            let s = i16::from_le_bytes([frame_bytes[off], frame_bytes[off + 1]]);
+            return s as f32 / 32768.0;
+        }
+    } else if !is_float && bits == 32 {
+        let off = ch_idx * 4;
+        if off + 4 <= frame_bytes.len() {
+            let s = i32::from_le_bytes([
+                frame_bytes[off],
+                frame_bytes[off + 1],
+                frame_bytes[off + 2],
+                frame_bytes[off + 3],
+            ]);
+            return s as f32 / 2147483648.0;
+        }
+    } else if !is_float && bits == 24 {
+        let off = ch_idx * 3;
+        if off + 3 <= frame_bytes.len() {
+            let raw = ((frame_bytes[off] as i32) << 8)
+                | ((frame_bytes[off + 1] as i32) << 16)
+                | ((frame_bytes[off + 2] as i32) << 24);
+            return (raw >> 8) as f32 / 8388608.0;
+        }
+    } else if !is_float && bits == 8 {
+        if ch_idx < frame_bytes.len() {
+            return (frame_bytes[ch_idx] as f32 - 128.0) / 128.0;
+        }
     }
-    E_FAIL
+    0.0
 }
 
 unsafe extern "win64" fn audio_render_release_buffer(
-    _this: *mut c_void,
+    this: *mut c_void,
     num_frames_written: u32,
     dw_flags: u32,
 ) -> HRESULT {
@@ -1648,64 +1943,67 @@ unsafe extern "win64" fn audio_render_release_buffer(
             rel_c, num_frames_written, dw_flags, prev_flags
         );
     }
-    let align = AUDIO_BLOCK_ALIGN.load(Ordering::Relaxed).max(1) as usize;
-    let is_float = AUDIO_IS_FLOAT.load(Ordering::Relaxed);
-    let mut buf_guard = AUDIO_BUFFER.lock().unwrap();
-    if let Some(buf) = buf_guard.as_mut() {
-        let bytes_written = (num_frames_written as usize) * align;
-        if bytes_written > 0 && bytes_written <= buf.len() {
-            const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 0x2;
-            if (dw_flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 {
-                let queued = get_sdl_queued_audio_bytes();
-                if queued < bytes_written as u32 {
-                    buf[..bytes_written].fill(0);
-                    queue_sdl_audio(buf.as_ptr(), bytes_written);
+    let Some(state_arc) = get_obj_stream_state(this) else {
+        return E_FAIL;
+    };
+    let Ok(mut st) = state_arc.lock() else {
+        return E_FAIL;
+    };
+
+    if num_frames_written > 0 {
+        let capacity_frames = st.buffer_size_frames as usize;
+        let current_frames = st.queued_frames() as usize;
+        let free_frames = capacity_frames.saturating_sub(current_frames);
+        let frames_to_push = (num_frames_written as usize).min(free_frames);
+
+        const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 0x2;
+        if (dw_flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 {
+            st.queued_stereo_f32
+                .extend(std::iter::repeat(0.0f32).take(frames_to_push * 2));
+        } else {
+            let align = st.block_align.max(1) as usize;
+            let channels = st.channels.max(1) as usize;
+            let bits = st.bits_per_sample;
+            let is_float = st.is_float;
+            let avail_buf_frames = st.staging_buf.len() / align;
+            let actual_frames = frames_to_push.min(avail_buf_frames);
+
+            let mut max_amp: f32 = 0.0;
+            let mut nonzero = 0u64;
+
+            for f in 0..actual_frames {
+                let frame_slice = &st.staging_buf[f * align..(f + 1) * align];
+                let l = read_sample_as_f32(frame_slice, 0, bits, is_float);
+                let r = if channels >= 2 {
+                    read_sample_as_f32(frame_slice, 1, bits, is_float)
                 } else {
-                    AUDIO_BYTES_SUBMITTED_TOTAL.fetch_add(bytes_written as u64, Ordering::Relaxed);
-                }
-            } else {
-                let mut max_amp: f32 = 0.0;
-                let mut nonzero = 0u64;
-                if is_float && bytes_written >= 4 {
-                    let floats =
-                        std::slice::from_raw_parts(buf.as_ptr() as *const f32, bytes_written / 4);
-                    for &sample in floats {
-                        let abs = sample.abs();
-                        if abs > 1e-4 {
-                            nonzero += 1;
-                            if abs > max_amp {
-                                max_amp = abs;
-                            }
-                        }
-                    }
-                } else if !is_float && bytes_written >= 2 {
-                    let shorts =
-                        std::slice::from_raw_parts(buf.as_ptr() as *const i16, bytes_written / 2);
-                    for &sample in shorts {
-                        let abs = (sample as f32).abs() / 32768.0;
-                        if abs > 1e-4 {
-                            nonzero += 1;
-                            if abs > max_amp {
-                                max_amp = abs;
-                            }
+                    l
+                };
+                for &sample in &[l, r] {
+                    let abs = sample.abs();
+                    if abs > 1e-4 {
+                        nonzero += 1;
+                        if abs > max_amp {
+                            max_amp = abs;
                         }
                     }
                 }
-                if nonzero > 0 {
-                    AUDIO_NONZERO_SAMPLES_COUNT.fetch_add(nonzero, Ordering::Relaxed);
-                    let amp_int = ((max_amp * 1000.0) as u32).min(1000);
-                    AUDIO_PEAK_AMPLITUDE_MILLIS.fetch_max(amp_int, Ordering::Relaxed);
-                }
-                queue_sdl_audio(buf.as_ptr(), bytes_written);
+                st.queued_stereo_f32.push_back(l);
+                st.queued_stereo_f32.push_back(r);
+            }
+            // If caller wrote more frames than staging_buf held (shouldn't happen), pad silence to match frames_to_push
+            if frames_to_push > actual_frames {
+                st.queued_stereo_f32
+                    .extend(std::iter::repeat(0.0f32).take((frames_to_push - actual_frames) * 2));
+            }
+            if nonzero > 0 {
+                AUDIO_NONZERO_SAMPLES_COUNT.fetch_add(nonzero, Ordering::Relaxed);
+                let amp_int = ((max_amp * 1000.0) as u32).min(1000);
+                AUDIO_PEAK_AMPLITUDE_MILLIS.fetch_max(amp_int, Ordering::Relaxed);
             }
         }
     }
-    let h_event = AUDIO_EVENT_HANDLE.load(Ordering::SeqCst);
-    if h_event != 0 {
-        unsafe {
-            crate::dlls::kernel32::SetEvent(h_event);
-        }
-    }
+    // Do NOT call SetEvent inside ReleaseBuffer; the mixer/clock thread paces events.
     S_OK
 }
 
@@ -1722,6 +2020,13 @@ static mut AUDIO_CLOCK_VTBL: [*const c_void; 6] = [
 ];
 
 pub unsafe extern "win64" fn create_audio_clock(ppv: *mut *mut c_void) -> HRESULT {
+    create_audio_clock_with_state(ppv, None)
+}
+
+unsafe fn create_audio_clock_with_state(
+    ppv: *mut *mut c_void,
+    state: Option<Arc<Mutex<AudioStreamState>>>,
+) -> HRESULT {
     if ppv.is_null() {
         return E_POINTER;
     }
@@ -1731,6 +2036,7 @@ pub unsafe extern "win64" fn create_audio_clock(ppv: *mut *mut c_void) -> HRESUL
     }
     (*obj).lpVtbl = AUDIO_CLOCK_VTBL.as_ptr() as *const c_void;
     (*obj).refcount = 1;
+    set_obj_stream_state(obj, state);
     *ppv = obj as *mut c_void;
     println!("[WASAPI] Created IAudioClock (obj=0x{:016X})", obj as usize);
     S_OK
@@ -1761,40 +2067,53 @@ unsafe extern "win64" fn audio_clock_release(this: *mut c_void) -> u32 {
         (*obj).refcount -= 1;
         (*obj).refcount
     } else {
+        drop_obj_stream_state(this);
         libc::free(this);
         0
     }
 }
 
 unsafe extern "win64" fn audio_clock_get_frequency(
-    _this: *mut c_void,
+    this: *mut c_void,
     pu64_frequency: *mut u64,
 ) -> HRESULT {
     if pu64_frequency.is_null() {
         return E_POINTER;
     }
-    let rate = AUDIO_SAMPLE_RATE.load(Ordering::Relaxed).max(44100) as u64;
+    let rate = get_obj_stream_state(this)
+        .and_then(|arc| arc.lock().ok().map(|st| st.sample_rate.max(8000) as u64))
+        .unwrap_or_else(|| AUDIO_SAMPLE_RATE.load(Ordering::Relaxed).max(44100) as u64);
     *pu64_frequency = rate;
     S_OK
 }
 
 unsafe extern "win64" fn audio_clock_get_position(
-    _this: *mut c_void,
+    this: *mut c_void,
     pu64_position: *mut u64,
     pu64_qpc_position: *mut u64,
 ) -> HRESULT {
     if pu64_position.is_null() {
         return E_POINTER;
     }
-    let align = AUDIO_BLOCK_ALIGN.load(Ordering::Relaxed).max(1) as u64;
-    let bytes = AUDIO_BYTES_SUBMITTED_TOTAL.load(Ordering::Relaxed);
-    let queued = get_sdl_queued_audio_bytes() as u64;
-    let played_bytes = bytes.saturating_sub(queued);
-    *pu64_position = played_bytes / align;
-    static CLK_C: AtomicU64 = AtomicU64::new(0);
-    let c = CLK_C.fetch_add(1, Ordering::Relaxed);
-    if c < 20 || c % 100 == 0 {
-        println!("[WASAPI] GetPosition #{} -> pos={}, queued={}", c, *pu64_position, queued);
+    if let Some(state_arc) = get_obj_stream_state(this) {
+        let frames_played = state_arc.lock().map(|st| st.frames_played).unwrap_or(0);
+        *pu64_position = frames_played;
+        static CLK_C: AtomicU64 = AtomicU64::new(0);
+        let c = CLK_C.fetch_add(1, Ordering::Relaxed);
+        if c < 20 || c % 100 == 0 {
+            println!("[WASAPI] GetPosition #{} -> pos={}", c, *pu64_position);
+        }
+    } else {
+        let align = AUDIO_BLOCK_ALIGN.load(Ordering::Relaxed).max(1) as u64;
+        let bytes = AUDIO_BYTES_SUBMITTED_TOTAL.load(Ordering::Relaxed);
+        let queued = get_sdl_queued_audio_bytes() as u64;
+        let played_bytes = bytes.saturating_sub(queued);
+        *pu64_position = played_bytes / align;
+        static CLK_C: AtomicU64 = AtomicU64::new(0);
+        let c = CLK_C.fetch_add(1, Ordering::Relaxed);
+        if c < 20 || c % 100 == 0 {
+            println!("[WASAPI] GetPosition #{} -> pos={}, queued={}", c, *pu64_position, queued);
+        }
     }
     if !pu64_qpc_position.is_null() {
         let mut qpc = 0i64;
@@ -1939,6 +2258,13 @@ static mut AUDIO_SESSION_CONTROL_VTBL: [*const c_void; 12] = [
 ];
 
 pub unsafe extern "win64" fn create_audio_session_control(ppv: *mut *mut c_void) -> HRESULT {
+    create_audio_session_control_with_state(ppv, None)
+}
+
+unsafe fn create_audio_session_control_with_state(
+    ppv: *mut *mut c_void,
+    state: Option<Arc<Mutex<AudioStreamState>>>,
+) -> HRESULT {
     if ppv.is_null() {
         return E_POINTER;
     }
@@ -1948,6 +2274,7 @@ pub unsafe extern "win64" fn create_audio_session_control(ppv: *mut *mut c_void)
     }
     (*obj).lpVtbl = AUDIO_SESSION_CONTROL_VTBL.as_ptr() as *const c_void;
     (*obj).refcount = 1;
+    set_obj_stream_state(obj, state);
     *ppv = obj as *mut c_void;
     println!("[WASAPI] Created IAudioSessionControl (obj=0x{:016X})", obj as usize);
     S_OK
@@ -1978,6 +2305,7 @@ unsafe extern "win64" fn audio_session_control_release(this: *mut c_void) -> u32
         (*obj).refcount -= 1;
         (*obj).refcount
     } else {
+        drop_obj_stream_state(this);
         libc::free(this);
         0
     }
@@ -2061,6 +2389,51 @@ unsafe extern "win64" fn audio_session_control_unregister_notification(
     S_OK
 }
 
+pub unsafe extern "win64" fn X3DAudioInitialize(
+    _speaker_channel_mask: u32,
+    _speed_of_sound: f32,
+    instance: *mut u8,
+) -> HRESULT {
+    if !instance.is_null() {
+        std::ptr::write_bytes(instance, 0, 20);
+    }
+    S_OK
+}
+
+pub unsafe extern "win64" fn X3DAudioCalculate(
+    _instance: *const u8,
+    _listener: *const c_void,
+    _emitter: *const c_void,
+    _flags: u32,
+    _dsp_settings: *mut c_void,
+) {
+}
+
+pub unsafe extern "win64" fn CreateFX(
+    _clsid: *const c_void,
+    p_effect: *mut *mut c_void,
+    _p_init_data: *const c_void,
+    _init_data_byte_size: u32,
+) -> HRESULT {
+    if !p_effect.is_null() {
+        *p_effect = std::ptr::null_mut();
+    }
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
+pub unsafe extern "win64" fn ActivateAudioInterfaceAsync(
+    _device_interface_path: *const u16,
+    _riid: *const c_void,
+    _activation_params: *const c_void,
+    _completion_handler: *mut c_void,
+    activation_operation: *mut *mut c_void,
+) -> HRESULT {
+    if !activation_operation.is_null() {
+        *activation_operation = std::ptr::null_mut();
+    }
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2132,6 +2505,153 @@ mod tests {
             assert!(qpc > 0);
 
             libc::free(p_clock);
+        }
+    }
+
+    #[test]
+    fn test_wasapi_multi_client_isolation_and_mixing() {
+        unsafe {
+            let mut client1: *mut c_void = std::ptr::null_mut();
+            let mut client2: *mut c_void = std::ptr::null_mut();
+            assert_eq!(create_audio_client(&mut client1), S_OK);
+            assert_eq!(create_audio_client(&mut client2), S_OK);
+
+            // Client 1: 48kHz stereo 32-bit float, 100ms buffer (4800 frames)
+            let wfx1 = WAVEFORMATEX {
+                wFormatTag: 3, // IEEE_FLOAT
+                nChannels: 2,
+                nSamplesPerSec: 48000,
+                nAvgBytesPerSec: 48000 * 8,
+                nBlockAlign: 8,
+                wBitsPerSample: 32,
+                cbSize: 0,
+            };
+            assert_eq!(
+                audio_client_initialize(client1, 0, 0, 1_000_000, 0, &wfx1, std::ptr::null()),
+                S_OK
+            );
+
+            // Client 2: 48kHz stereo 16-bit PCM, 50ms buffer (2400 frames)
+            let wfx2 = WAVEFORMATEX {
+                wFormatTag: 1, // PCM
+                nChannels: 2,
+                nSamplesPerSec: 48000,
+                nAvgBytesPerSec: 48000 * 4,
+                nBlockAlign: 4,
+                wBitsPerSample: 16,
+                cbSize: 0,
+            };
+            assert_eq!(
+                audio_client_initialize(client2, 0, 0, 500_000, 0, &wfx2, std::ptr::null()),
+                S_OK
+            );
+
+            // Verify buffer sizes remain isolated per client
+            let mut buf1 = 0u32;
+            let mut buf2 = 0u32;
+            assert_eq!(audio_client_get_buffer_size(client1, &mut buf1), S_OK);
+            assert_eq!(audio_client_get_buffer_size(client2, &mut buf2), S_OK);
+            assert_eq!(buf1, 4800);
+            assert_eq!(buf2, 2400);
+
+            // GetService for both clients
+            let iid_render = GUID {
+                Data1: 0xF294ACFC,
+                Data2: 0,
+                Data3: 0,
+                Data4: [0; 8],
+            };
+            let iid_clock = GUID {
+                Data1: 0xCD63314F,
+                Data2: 0,
+                Data3: 0,
+                Data4: [0; 8],
+            };
+            let mut render1: *mut c_void = std::ptr::null_mut();
+            let mut render2: *mut c_void = std::ptr::null_mut();
+            let mut clock1: *mut c_void = std::ptr::null_mut();
+            let mut clock2: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                audio_client_get_service(client1, &iid_render as *const GUID as *const u8, &mut render1),
+                S_OK
+            );
+            assert_eq!(
+                audio_client_get_service(client2, &iid_render as *const GUID as *const u8, &mut render2),
+                S_OK
+            );
+            assert_eq!(
+                audio_client_get_service(client1, &iid_clock as *const GUID as *const u8, &mut clock1),
+                S_OK
+            );
+            assert_eq!(
+                audio_client_get_service(client2, &iid_clock as *const GUID as *const u8, &mut clock2),
+                S_OK
+            );
+
+            // Client 1 writes 960 non-silent float frames
+            let mut p_data1: *mut u8 = std::ptr::null_mut();
+            assert_eq!(audio_render_get_buffer(render1, 960, &mut p_data1), S_OK);
+            assert!(!p_data1.is_null());
+            let slice1 = std::slice::from_raw_parts_mut(p_data1 as *mut f32, 960 * 2);
+            slice1.fill(0.5);
+            assert_eq!(audio_render_release_buffer(render1, 960, 0), S_OK);
+
+            // Client 2 writes 600 silent frames (AUDCLNT_BUFFERFLAGS_SILENT = 0x2)
+            let mut p_data2: *mut u8 = std::ptr::null_mut();
+            assert_eq!(audio_render_get_buffer(render2, 600, &mut p_data2), S_OK);
+            assert!(!p_data2.is_null());
+            assert_eq!(audio_render_release_buffer(render2, 600, 0x2), S_OK);
+
+            // Padding must advance for both clients independently, including silent frames
+            let mut pad1 = 0u32;
+            let mut pad2 = 0u32;
+            assert_eq!(audio_client_get_current_padding(client1, &mut pad1), S_OK);
+            assert_eq!(audio_client_get_current_padding(client2, &mut pad2), S_OK);
+            assert_eq!(pad1, 960);
+            assert_eq!(pad2, 600);
+
+            // Start Client 1 only; Client 2 is not started yet
+            if let Some(st1) = get_obj_stream_state(client1) {
+                st1.lock().unwrap().started = true;
+            }
+            mix_and_submit_audio_tick();
+
+            // Client 1 should have drained 480 frames; Client 2 should still have 600
+            assert_eq!(audio_client_get_current_padding(client1, &mut pad1), S_OK);
+            assert_eq!(audio_client_get_current_padding(client2, &mut pad2), S_OK);
+            assert_eq!(pad1, 480);
+            assert_eq!(pad2, 600);
+
+            let mut pos1 = 0u64;
+            let mut pos2 = 0u64;
+            assert_eq!(audio_clock_get_position(clock1, &mut pos1, std::ptr::null_mut()), S_OK);
+            assert_eq!(audio_clock_get_position(clock2, &mut pos2, std::ptr::null_mut()), S_OK);
+            assert_eq!(pos1, 480);
+            assert_eq!(pos2, 0);
+
+            // Now start Client 2 and run another mixer tick
+            if let Some(st2) = get_obj_stream_state(client2) {
+                st2.lock().unwrap().started = true;
+            }
+            mix_and_submit_audio_tick();
+
+            assert_eq!(audio_client_get_current_padding(client1, &mut pad1), S_OK);
+            assert_eq!(audio_client_get_current_padding(client2, &mut pad2), S_OK);
+            assert_eq!(pad1, 0);
+            assert_eq!(pad2, 120);
+
+            assert_eq!(audio_clock_get_position(clock1, &mut pos1, std::ptr::null_mut()), S_OK);
+            assert_eq!(audio_clock_get_position(clock2, &mut pos2, std::ptr::null_mut()), S_OK);
+            assert_eq!(pos1, 960);
+            assert_eq!(pos2, 480);
+
+            // Clean up COM objects
+            audio_clock_release(clock1);
+            audio_clock_release(clock2);
+            audio_render_release(render1);
+            audio_render_release(render2);
+            audio_client_release(client1);
+            audio_client_release(client2);
         }
     }
 }

@@ -357,6 +357,10 @@ pub unsafe fn init_sdl2_and_create_window(
             CString::new("SDL_NO_SIGNAL_HANDLERS").unwrap().as_ptr(),
             CString::new("1").unwrap().as_ptr(),
         );
+        fn_hint(
+            CString::new("SDL_MOUSE_RELATIVE_MODE_WARP").unwrap().as_ptr(),
+            CString::new("1").unwrap().as_ptr(),
+        );
     }
 
     let init_res = fn_init(0x00000020 | 0x00100000); // SDL_INIT_VIDEO | SDL_INIT_NOPARACHUTE

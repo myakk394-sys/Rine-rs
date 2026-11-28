@@ -186,3 +186,80 @@ pub unsafe extern "win64" fn CryptBinaryToStringW(
     *pcch_string = copy_len as u32;
     1
 }
+
+#[repr(C)]
+pub struct CryptoApiBlob {
+    pub cb_data: u32,
+    pub pb_data: *mut u8,
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CryptProtectData(
+    p_data_in: *const CryptoApiBlob,
+    _sz_data_descr: *const u16,
+    _p_optional_entropy: *const CryptoApiBlob,
+    _pv_reserved: *mut u8,
+    _p_prompt_struct: *mut u8,
+    _dw_flags: u32,
+    p_data_out: *mut CryptoApiBlob,
+) -> i32 {
+    if p_data_in.is_null() || p_data_out.is_null() {
+        return 0;
+    }
+    let in_len = (*p_data_in).cb_data as usize;
+    let in_ptr = (*p_data_in).pb_data;
+    if in_len > 0 && in_ptr.is_null() {
+        return 0;
+    }
+    let out_len = in_len + 4;
+    let out_ptr = crate::dlls::kernel32::LocalAlloc(0x40, out_len) as *mut u8;
+    if out_ptr.is_null() {
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(b"RINE".as_ptr(), out_ptr, 4);
+    for i in 0..in_len {
+        *out_ptr.add(4 + i) = (*in_ptr.add(i)) ^ 0x5A;
+    }
+    (*p_data_out).cb_data = out_len as u32;
+    (*p_data_out).pb_data = out_ptr;
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CryptUnprotectData(
+    p_data_in: *const CryptoApiBlob,
+    ppsz_data_descr: *mut *mut u16,
+    _p_optional_entropy: *const CryptoApiBlob,
+    _pv_reserved: *mut u8,
+    _p_prompt_struct: *mut u8,
+    _dw_flags: u32,
+    p_data_out: *mut CryptoApiBlob,
+) -> i32 {
+    if p_data_in.is_null() || p_data_out.is_null() {
+        return 0;
+    }
+    let in_len = (*p_data_in).cb_data as usize;
+    let in_ptr = (*p_data_in).pb_data;
+    if in_len == 0 || in_ptr.is_null() {
+        return 0;
+    }
+    let input = std::slice::from_raw_parts(in_ptr, in_len);
+    let (plain_len, xor_mask, offset) = if in_len >= 4 && &input[..4] == b"RINE" {
+        (in_len - 4, 0x5Au8, 4usize)
+    } else {
+        (in_len, 0u8, 0usize)
+    };
+    let out_ptr = crate::dlls::kernel32::LocalAlloc(0x40, plain_len.max(1)) as *mut u8;
+    if out_ptr.is_null() {
+        return 0;
+    }
+    for i in 0..plain_len {
+        *out_ptr.add(i) = input[offset + i] ^ xor_mask;
+    }
+    if !ppsz_data_descr.is_null() {
+        *ppsz_data_descr = std::ptr::null_mut();
+    }
+    (*p_data_out).cb_data = plain_len as u32;
+    (*p_data_out).pb_data = out_ptr;
+    1
+}

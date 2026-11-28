@@ -402,10 +402,22 @@ extern "C" fn rine_signal_handler(sig: c_int, info: *mut siginfo_t, ucontext: *m
                 );
                 libc::syscall(libc::SYS_exit, 0);
             }
-            std::process::exit(128 + sig);
+            let code = if crate::sys::shutdown::is_shutdown_requested() {
+                0
+            } else {
+                128 + sig
+            };
+            libc::_exit(code);
         }
     }
-    std::process::exit(128 + sig);
+    let code = if crate::sys::shutdown::is_shutdown_requested() {
+        0
+    } else {
+        128 + sig
+    };
+    unsafe {
+        libc::_exit(code);
+    }
 }
 
 extern "C" fn rine_termination_signal_handler(sig: c_int) {
@@ -442,9 +454,28 @@ extern "C" fn rine_suspend_signal_handler(
             let r14 = mctx.gregs[libc::REG_R14 as usize] as u64;
             let r15 = mctx.gregs[libc::REG_R15 as usize] as u64;
 
-            crate::dlls::kernel32::on_thread_suspended_signal(
+            if let Some(regs) = crate::dlls::kernel32::on_thread_suspended_signal(
                 rsp, rbp, rip, rax, rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15,
-            );
+            ) {
+                let g = &mut (*uctx).uc_mcontext.gregs;
+                g[libc::REG_RSP as usize] = regs[0] as libc::greg_t;
+                g[libc::REG_RBP as usize] = regs[1] as libc::greg_t;
+                g[libc::REG_RIP as usize] = regs[2] as libc::greg_t;
+                g[libc::REG_RAX as usize] = regs[3] as libc::greg_t;
+                g[libc::REG_RBX as usize] = regs[4] as libc::greg_t;
+                g[libc::REG_RCX as usize] = regs[5] as libc::greg_t;
+                g[libc::REG_RDX as usize] = regs[6] as libc::greg_t;
+                g[libc::REG_RSI as usize] = regs[7] as libc::greg_t;
+                g[libc::REG_RDI as usize] = regs[8] as libc::greg_t;
+                g[libc::REG_R8 as usize] = regs[9] as libc::greg_t;
+                g[libc::REG_R9 as usize] = regs[10] as libc::greg_t;
+                g[libc::REG_R10 as usize] = regs[11] as libc::greg_t;
+                g[libc::REG_R11 as usize] = regs[12] as libc::greg_t;
+                g[libc::REG_R12 as usize] = regs[13] as libc::greg_t;
+                g[libc::REG_R13 as usize] = regs[14] as libc::greg_t;
+                g[libc::REG_R14 as usize] = regs[15] as libc::greg_t;
+                g[libc::REG_R15 as usize] = regs[16] as libc::greg_t;
+            }
         }
     }
 }

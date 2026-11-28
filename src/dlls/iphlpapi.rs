@@ -110,3 +110,38 @@ pub unsafe extern "win64" fn GetBestInterfaceEx(
     }
     ERROR_SUCCESS
 }
+
+#[no_mangle]
+pub unsafe extern "win64" fn NotifyAddrChange(
+    handle: *mut usize,
+    overlapped: *mut c_void,
+) -> u32 {
+    if !handle.is_null() {
+        *handle = 0x6001;
+    }
+    if !overlapped.is_null() {
+        997 // ERROR_IO_PENDING
+    } else {
+        ERROR_SUCCESS
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn NotifyRouteChange(
+    handle: *mut usize,
+    overlapped: *mut c_void,
+) -> u32 {
+    if !handle.is_null() {
+        *handle = 0x6002;
+    }
+    if !overlapped.is_null() {
+        997 // ERROR_IO_PENDING
+    } else {
+        ERROR_SUCCESS
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn CancelIPChangeNotify(_notify_overlapped: *const c_void) -> i32 {
+    1 // TRUE
+}
